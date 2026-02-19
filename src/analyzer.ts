@@ -127,25 +127,24 @@ function extractJurisdiction(text: string): { country: string; state?: string } 
 
 const ANALYSIS_PROMPT = `You are an expert analyst reviewing regulatory news for Meta. Analyze this regulatory item and extract structured data.
 
-Determine if this item is about teen/child online regulation affecting Meta (Facebook, Instagram, WhatsApp, etc.). If NOT relevant, return only: {"isRelevant": false}
+Determine if this item is about teen/child/minor online regulation that could affect Meta (Facebook, Instagram, WhatsApp, Threads, Messenger). Be INCLUSIVE — it is far better to include a borderline-relevant item than to miss a real regulation.
 
-If RELEVANT, extract:
-- jurisdiction (country and optionally state)
-- stage (proposed/introduced/committee_review/passed/enacted/effective/amended/withdrawn/rejected)
-- age bracket (13-15 / 16-18 / both)
-- affected Meta products
-- summary (2-3 sentences)
-- business impact
-- required solutions
-- competitor responses mentioned
+Mark as RELEVANT if the content relates to ANY of:
+- Laws, bills, regulations, or enforcement about children/teens/minors online
+- Data protection laws with children's provisions (GDPR Art.8, COPPA, LGPD, DPDP, etc.)
+- Platform safety obligations for users under 18
+- Age verification, parental consent, or children's data protection
+- Social media restrictions for minors
+- AI regulation with provisions affecting minors
+- Online safety acts, digital services acts, content moderation rules
+- Advertising/profiling restrictions for children
+- Even if text is noisy or partial — if source/title suggests child/teen regulation, mark RELEVANT
 
-Also score:
-- impact (1-5): How much this affects Meta's business
-- likelihood (1-5): How likely this is to become law
-- confidence (1-5): How confident you are in this analysis
-- chili (1-5): Spiciness/urgency level
+If NOT relevant, return only: {"isRelevant": false}
 
-Return ONLY valid JSON in this exact format:
+If RELEVANT, extract jurisdiction, stage, age bracket, affected products, summary, impact, solutions, competitor responses, and scores.
+
+Return ONLY valid JSON (no markdown, no code fences) in this exact format:
 {
   "isRelevant": true/false,
   "jurisdictionCountry": "Country name",
@@ -171,35 +170,53 @@ export async function analyzeItem(item: CrawledItem): Promise<AnalyzedItem> {
   }
 
   try {
-    const response = await fetch("https://api.minimax.io/anthropic", {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    
+    const response = await fetch("https://api.minimax.io/anthropic/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "minimax-coding-plan/MiniMax-M2.5",
+        model: "MiniMax-M2.5",
+        max_tokens: 2048,
         messages: [
-          { role: "system", content: ANALYSIS_PROMPT },
           {
             role: "user",
-            content: `Title: ${item.title}\n\nContent: ${item.content.substring(0, 3000)}`,
+            content: `${ANALYSIS_PROMPT}\n\n---\n\nTitle: ${item.title}\n\nContent: ${item.content.substring(0, 6000)}`,
           },
         ],
-        temperature: 0.2,
       }),
+      signal: controller.signal,
     });
+    clearTimeout(timer);
 
     if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
+      const errBody = await response.text().catch(() => "");
+      throw new Error(`API error: ${response.status} ${errBody.slice(0, 200)}`);
     }
 
     const data = await response.json() as {
-      content?: Array<{ text?: string }>;
+      content?: Array<{ type?: string; text?: string }>;
     };
     
-    const content = data.content?.[0]?.text || "";
-    const parsed = JSON.parse(content);
+    const rawContent = data.content?.find(c => c.type === "text")?.text || data.content?.[0]?.text || "";
+    if (!rawContent) {
+      throw new Error("Empty response from API");
+    }
+    
+    // Strip markdown fences if present
+    let cleanContent = rawContent.trim();
+    if (cleanContent.startsWith("```")) {
+      cleanContent = cleanContent.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    }
+    // Extract JSON object
+    const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON found in response");
+    const parsed = JSON.parse(jsonMatch[0]);
 
     if (!parsed.isRelevant) {
       return {
