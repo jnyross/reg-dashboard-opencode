@@ -242,6 +242,24 @@ export async function analyzeItem(item: CrawledItem): Promise<AnalyzedItem> {
       };
     }
 
+    // Normalize stage to allowed values
+    const allowedStages = new Set(["proposed", "introduced", "committee_review", "passed", "enacted", "effective", "amended", "withdrawn", "rejected"]);
+    let stage = String(parsed.stage || "proposed").toLowerCase().replace(/\s+/g, "_");
+    if (!allowedStages.has(stage)) {
+      // Try common mappings
+      if (/enforc|in.force|active|implement/i.test(stage)) stage = "effective";
+      else if (/sign|law|legislat/i.test(stage)) stage = "enacted";
+      else if (/pass|approv|adopt/i.test(stage)) stage = "passed";
+      else if (/draft|consult|review/i.test(stage)) stage = "proposed";
+      else if (/amend|revis|updat/i.test(stage)) stage = "amended";
+      else stage = "proposed";
+    }
+
+    // Normalize ageBracket
+    const allowedBrackets = new Set(["13-15", "16-18", "both", "unknown"]);
+    let ageBracket = String(parsed.ageBracket || "unknown");
+    if (!allowedBrackets.has(ageBracket)) ageBracket = "both";
+
     return {
       sourceId: item.sourceId,
       url: item.url,
@@ -251,17 +269,17 @@ export async function analyzeItem(item: CrawledItem): Promise<AnalyzedItem> {
       isRelevant: true,
       jurisdictionCountry: parsed.jurisdictionCountry || "Unknown",
       jurisdictionState: parsed.jurisdictionState,
-      stage: parsed.stage || "proposed",
-      ageBracket: parsed.ageBracket || "unknown",
-      affectedProducts: parsed.affectedProducts || [],
+      stage: stage as RegulationStage,
+      ageBracket: ageBracket as AgeBracket,
+      affectedProducts: Array.isArray(parsed.affectedProducts) ? parsed.affectedProducts : [],
       summary: parsed.summary || "",
       businessImpact: parsed.businessImpact || "",
-      requiredSolutions: parsed.requiredSolutions || [],
-      competitorResponses: parsed.competitorResponses || [],
-      impactScore: Math.min(5, Math.max(1, parsed.impactScore || 3)),
-      likelihoodScore: Math.min(5, Math.max(1, parsed.likelihoodScore || 3)),
-      confidenceScore: Math.min(5, Math.max(1, parsed.confidenceScore || 3)),
-      chiliScore: Math.min(5, Math.max(1, parsed.chiliScore || 3)),
+      requiredSolutions: Array.isArray(parsed.requiredSolutions) ? parsed.requiredSolutions : [],
+      competitorResponses: Array.isArray(parsed.competitorResponses) ? parsed.competitorResponses : [],
+      impactScore: Math.min(5, Math.max(1, Math.round(parsed.impactScore || 3))),
+      likelihoodScore: Math.min(5, Math.max(1, Math.round(parsed.likelihoodScore || 3))),
+      confidenceScore: Math.min(5, Math.max(1, Math.round(parsed.confidenceScore || 3))),
+      chiliScore: Math.min(5, Math.max(1, Math.round(parsed.chiliScore || 3))),
       analyzedAt: new Date().toISOString(),
     };
   } catch (error) {
