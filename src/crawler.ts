@@ -29,7 +29,7 @@ const USER_AGENT =
 
 async function fetchWithTimeout(
   url: string,
-  timeoutMs = 15000
+  timeoutMs = 30000
 ): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
