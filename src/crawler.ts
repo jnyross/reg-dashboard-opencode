@@ -58,7 +58,10 @@ function parseRSSFeed(xml: string): CrawledItem[] {
   const itemList = channel.item || channel.entry || [];
   const itemsArray = Array.isArray(itemList) ? itemList : [itemList];
 
+  const MAX_ITEMS_PER_FEED = 5;
   for (const item of itemsArray) {
+    if (items.length >= MAX_ITEMS_PER_FEED) break;
+    
     const title = item.title?.["#text"] || item.title || "";
     const link = item.link?.["@_href"] || item.link || "";
     const description =
@@ -75,12 +78,17 @@ function parseRSSFeed(xml: string): CrawledItem[] {
     const pubDate = item.pubDate || item.published || item.updated || "";
 
     if (title && (link || content)) {
+      let pubDateIso: string | undefined;
+      try {
+        pubDateIso = pubDate ? new Date(pubDate).toISOString() : undefined;
+      } catch { pubDateIso = undefined; }
+      
       items.push({
         sourceId: "",
         url: Array.isArray(link) ? link[0]?.["@_href"] || link[0] || "" : link,
         title: String(title).trim(),
-        content: String(content).trim(),
-        publishedDate: pubDate ? new Date(pubDate).toISOString() : undefined,
+        content: String(content).trim().substring(0, 8000),
+        publishedDate: pubDateIso,
         extractedAt: new Date().toISOString(),
       });
     }
@@ -104,12 +112,12 @@ function extractFromHTML(html: string, sourceId: string): CrawledItem[] {
   const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
   const title = titleMatch ? titleMatch[1].trim() : "Unknown";
 
-  if (content.length > 100) {
+  if (content.length > 50) {
     items.push({
       sourceId,
       url: sources.find((s) => s.id === sourceId)?.url || "",
       title,
-      content: content.substring(0, 5000),
+      content: content.substring(0, 8000),
       extractedAt: new Date().toISOString(),
     });
   }

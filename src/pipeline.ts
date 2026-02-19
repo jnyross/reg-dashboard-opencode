@@ -57,8 +57,11 @@ export async function runPipeline(
         result.errors.push(...crawlResult.errors.map((e) => `${source.name}: ${e}`));
       }
 
-      for (const item of crawlResult.items) {
+      console.log(`  Found ${crawlResult.items.length} items to analyze`);
+      for (let idx = 0; idx < crawlResult.items.length; idx++) {
+        const item = crawlResult.items[idx];
         try {
+          console.log(`  [${idx+1}/${crawlResult.items.length}] Analyzing: ${item.title.slice(0, 70)}...`);
           const analyzed = await analyzeItem(item);
           analyzed.sourceId = sourceDbId.toString();
           result.itemsAnalyzed++;
@@ -66,14 +69,14 @@ export async function runPipeline(
           if (analyzed.isRelevant) {
             const saveResult = upsertAnalyzedItem(db, analyzed, source.reliabilityTier);
             result.itemsSaved++;
-            
-            if (saveResult.statusChanged) {
-              console.log(`  Status changed for: ${analyzed.title}`);
-            }
+            console.log(`    → Saved (relevant)${saveResult.statusChanged ? ' [STATUS CHANGED]' : ''}`);
+          } else {
+            console.log(`    → Skipped (not relevant)`);
           }
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           result.errors.push(`Analysis error (${source.name}): ${msg}`);
+          console.log(`    → Error: ${msg.slice(0, 100)}`);
         }
 
         await new Promise((resolve) => setTimeout(resolve, 300));
