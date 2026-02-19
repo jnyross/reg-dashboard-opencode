@@ -1,5 +1,6 @@
 import express, { Request, Response } from "express";
 import DatabaseConstructor from "better-sqlite3";
+import { runPipeline } from "./pipeline";
 
 type Stage =
   | "proposed"
@@ -54,16 +55,23 @@ type DbEventRow = {
   jurisdiction_country: string;
   jurisdiction_state: string | null;
   stage: Stage;
+  age_bracket: string;
   is_under16_applicable: number;
   impact_score: number;
   likelihood_score: number;
   confidence_score: number;
   chili_score: number;
   summary: string | null;
+  business_impact: string | null;
+  required_solutions: string | null;
+  competitor_responses: string | null;
   effective_date: string | null;
   published_date: string | null;
-  source_name: string;
   source_url: string;
+  raw_content: string | null;
+  reliability_tier: number;
+  status: string;
+  last_crawled_at: string | null;
   updated_at: string;
   created_at: string;
   urgency_rank?: number;
@@ -123,6 +131,14 @@ function parseSingleInt(value: unknown, min?: number, max?: number): number | un
 }
 
 function mapEvent(row: DbEventRow) {
+  let requiredSolutions: string[] = [];
+  let competitorResponses: string[] = [];
+  
+  try {
+    requiredSolutions = row.required_solutions ? JSON.parse(row.required_solutions) : [];
+    competitorResponses = row.competitor_responses ? JSON.parse(row.competitor_responses) : [];
+  } catch {}
+
   return {
     id: row.id,
     title: row.title,
@@ -131,6 +147,7 @@ function mapEvent(row: DbEventRow) {
       state: row.jurisdiction_state,
     },
     stage: row.stage,
+    ageBracket: row.age_bracket,
     isUnder16Applicable: Boolean(row.is_under16_applicable),
     scores: {
       impact: row.impact_score,
@@ -139,12 +156,17 @@ function mapEvent(row: DbEventRow) {
       chili: row.chili_score,
     },
     summary: row.summary,
+    businessImpact: row.business_impact,
+    requiredSolutions,
+    competitorResponses,
     effectiveDate: row.effective_date,
     publishedDate: row.published_date,
     source: {
-      name: row.source_name,
       url: row.source_url,
     },
+    reliabilityTier: row.reliability_tier,
+    status: row.status,
+    lastCrawledAt: row.last_crawled_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -158,19 +180,25 @@ function createBriefSelect(sqlLimit: number): string {
       e.jurisdiction_country,
       e.jurisdiction_state,
       e.stage,
+      e.age_bracket,
       e.is_under16_applicable,
       e.chili_score,
       e.summary,
-      e.source_id,
-      s.name AS source_name,
-      s.url AS source_url,
+      e.business_impact,
+      e.effective_date,
+      e.published_date,
+      e.source_url,
+      e.raw_content,
+      e.reliability_tier,
+      e.status,
+      e.last_crawled_at,
       e.updated_at,
       e.created_at,
       e.impact_score,
       e.likelihood_score,
       e.confidence_score,
-      e.effective_date,
-      e.published_date,
+      e.required_solutions,
+      e.competitor_responses,
       CASE e.stage
         WHEN 'proposed' THEN 9
         WHEN 'introduced' THEN 8
@@ -183,7 +211,6 @@ function createBriefSelect(sqlLimit: number): string {
         WHEN 'rejected' THEN 1
       END AS urgency_rank
     FROM regulation_events e
-    JOIN sources s ON s.id = e.source_id
     ORDER BY
       e.chili_score DESC,
       urgency_rank DESC,
@@ -225,6 +252,7 @@ export function createApp(db: DatabaseConstructor.Database) {
   app.get("/api/events", (req: Request, res: Response) => {
     const jurisdiction = typeof req.query.jurisdiction === "string" ? req.query.jurisdiction.trim() : undefined;
     const stageRaw = typeof req.query.stage === "string" ? req.query.stage : undefined;
+    const ageBracketRaw = typeof req.query.ageBracket === "string" ? req.query.ageBracket.trim() : undefined;
     const minRisk = parseSingleInt(req.query.minRisk, 1, 5);
 
     if (req.query.minRisk !== undefined && minRisk === undefined) {
@@ -240,6 +268,11 @@ export function createApp(db: DatabaseConstructor.Database) {
       return res.status(400).json({ error: "stage must use valid lifecycle values" });
     }
 
+    const allowedAgeBrackets = ["13-15", "16-18", "both", "unknown"];
+    const requestedAgeBrackets = ageBracketRaw
+      ? ageBracketRaw.split(",").map((a) => a.trim()).filter((a) => allowedAgeBrackets.includes(a))
+      : [];
+
     const whereClauses: string[] = [];
     const params: (string | number)[] = [];
 
@@ -252,6 +285,12 @@ export function createApp(db: DatabaseConstructor.Database) {
       const placeholders = requestedStages.map(() => "?").join(", ");
       whereClauses.push(`e.stage IN (${placeholders})`);
       params.push(...requestedStages);
+    }
+
+    if (requestedAgeBrackets.length > 0) {
+      const placeholders = requestedAgeBrackets.map(() => "?").join(", ");
+      whereClauses.push(`e.age_bracket IN (${placeholders})`);
+      params.push(...requestedAgeBrackets);
     }
 
     if (minRisk !== undefined) {
@@ -274,20 +313,26 @@ export function createApp(db: DatabaseConstructor.Database) {
         e.jurisdiction_country,
         e.jurisdiction_state,
         e.stage,
+        e.age_bracket,
         e.is_under16_applicable,
         e.impact_score,
         e.likelihood_score,
         e.confidence_score,
         e.chili_score,
         e.summary,
+        e.business_impact,
+        e.required_solutions,
+        e.competitor_responses,
         e.effective_date,
         e.published_date,
+        e.source_url,
+        e.raw_content,
+        e.reliability_tier,
+        e.status,
+        e.last_crawled_at,
         e.updated_at,
-        e.created_at,
-        s.name AS source_name,
-        s.url AS source_url
+        e.created_at
       FROM regulation_events e
-      JOIN sources s ON s.id = e.source_id
       ${where}
       ORDER BY e.updated_at DESC, e.id ASC
       LIMIT ? OFFSET ?
@@ -315,20 +360,26 @@ export function createApp(db: DatabaseConstructor.Database) {
         e.jurisdiction_country,
         e.jurisdiction_state,
         e.stage,
+        e.age_bracket,
         e.is_under16_applicable,
         e.impact_score,
         e.likelihood_score,
         e.confidence_score,
         e.chili_score,
         e.summary,
+        e.business_impact,
+        e.required_solutions,
+        e.competitor_responses,
         e.effective_date,
         e.published_date,
+        e.source_url,
+        e.raw_content,
+        e.reliability_tier,
+        e.status,
+        e.last_crawled_at,
         e.updated_at,
-        e.created_at,
-        s.name AS source_name,
-        s.url AS source_url
+        e.created_at
       FROM regulation_events e
-      JOIN sources s ON s.id = e.source_id
       WHERE e.id = ?
     `
       )
@@ -388,6 +439,22 @@ export function createApp(db: DatabaseConstructor.Database) {
       note: note ?? null,
       createdAt,
     });
+  });
+
+  app.post("/api/crawl", async (req: Request, res: Response) => {
+    const body = req.body as { sourceIds?: string[] };
+    const sourceIds = body.sourceIds;
+
+    try {
+      const result = await runPipeline(db, sourceIds);
+      res.json({
+        success: true,
+        ...result,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Pipeline failed";
+      res.status(500).json({ error: message });
+    }
   });
 
   return app;

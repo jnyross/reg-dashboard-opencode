@@ -14,8 +14,9 @@
 
   <header>
     <div class="header-content">
-      <h1>Global Under-16 Regulation Dashboard</h1>
-      <p class="last-updated">Last updated: <span id="last-updated">Loading...</span></p>
+      <h1>Global Teen Regulation Dashboard</h1>
+      <p class="last-updated">Last updated: <span id="last-updated">Loading...</span> | Last crawled: <span id="last-crawled">Never</span></p>
+      <button id="crawl-btn" class="btn-primary" onclick="triggerCrawl()">🔄 Run Crawl</button>
     </div>
   </header>
 
@@ -35,6 +36,15 @@
             <label for="jurisdiction-filter">Jurisdiction:</label>
             <select id="jurisdiction-filter">
               <option value="">All Jurisdictions</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label for="age-bracket-filter">Age Bracket:</label>
+            <select id="age-bracket-filter">
+              <option value="">All Ages</option>
+              <option value="13-15">13-15 (Early Teens)</option>
+              <option value="16-18">16-18 (Late Teens)</option>
+              <option value="both">Both</option>
             </select>
           </div>
           <div class="filter-group">

@@ -1,90 +1,25 @@
 import DatabaseConstructor from "better-sqlite3";
 import { validateScoringBounds } from "./validation";
 
-type SeedSource = {
-  name: string;
-  url: string;
-  authorityType: "national" | "state" | "local" | "supranational";
-  jurisdiction: string;
-};
-
-type SeedEvent = {
-  id: string;
-  title: string;
-  jurisdictionCountry: string;
-  jurisdictionState: string | null;
-  stage:
-    | "proposed"
-    | "introduced"
-    | "committee_review"
-    | "passed"
-    | "enacted"
-    | "effective"
-    | "amended"
-    | "withdrawn"
-    | "rejected";
-  isUnder16Applicable: boolean;
-  impactScore: number;
-  likelihoodScore: number;
-  confidenceScore: number;
-  chiliScore: number;
-  summary: string;
-  effectiveDate: string | null;
-  publishedDate: string;
-  sourceName: string;
-  updatedAt: string;
-  createdAt: string;
-};
-
-const sources: SeedSource[] = [
-  {
-    name: "US Federal Register",
-    url: "https://www.federalregister.gov",
-    authorityType: "national",
-    jurisdiction: "United States",
-  },
-  {
-    name: "California State Legislature",
-    url: "https://www.ca.gov",
-    authorityType: "state",
-    jurisdiction: "California",
-  },
-  {
-    name: "European Commission",
-    url: "https://digital-strategy.ec.europa.eu",
-    authorityType: "supranational",
-    jurisdiction: "European Union",
-  },
-  {
-    name: "UK Office of Communications",
-    url: "https://www.ofcom.org.uk",
-    authorityType: "national",
-    jurisdiction: "United Kingdom",
-  },
-  {
-    name: "Singapore Government Gazette",
-    url: "https://www.egazette.gov.sg",
-    authorityType: "national",
-    jurisdiction: "Singapore",
-  },
-];
-
-const events: SeedEvent[] = [
+const events = [
   {
     id: "11111111-1111-1111-1111-111111111101",
     title: "US Federal Youth Privacy Modernization Proposal",
     jurisdictionCountry: "United States",
     jurisdictionState: null,
     stage: "proposed",
+    ageBracket: "13-15" as const,
     isUnder16Applicable: true,
     impactScore: 5,
     likelihoodScore: 5,
     confidenceScore: 4,
     chiliScore: 5,
     summary: "Draft proposal expands affirmative age-verification requirements for under-16 user features.",
+    businessImpact: "May require significant changes to age verification flows across all Meta platforms.",
     effectiveDate: "2026-04-30",
     publishedDate: "2026-02-10",
-    sourceName: "US Federal Register",
+    sourceUrl: "https://www.federalregister.gov",
+    reliabilityTier: 5,
     createdAt: "2026-01-10T10:00:00.000Z",
     updatedAt: "2026-02-10T10:00:00.000Z",
   },
@@ -94,15 +29,18 @@ const events: SeedEvent[] = [
     jurisdictionCountry: "United States",
     jurisdictionState: "California",
     stage: "introduced",
+    ageBracket: "both" as const,
     isUnder16Applicable: true,
     impactScore: 4,
     likelihoodScore: 4,
     confidenceScore: 5,
     chiliScore: 5,
     summary: "State bill requires algorithmic auditing for minors' recommendation systems.",
+    businessImpact: "Requires disclosure of algorithmic systems used for minor users in California.",
     effectiveDate: "2026-06-01",
     publishedDate: "2026-02-02",
-    sourceName: "California State Legislature",
+    sourceUrl: "https://www.ca.gov",
+    reliabilityTier: 5,
     createdAt: "2026-01-12T08:00:00.000Z",
     updatedAt: "2026-02-11T09:30:00.000Z",
   },
@@ -112,15 +50,18 @@ const events: SeedEvent[] = [
     jurisdictionCountry: "European Union",
     jurisdictionState: null,
     stage: "committee_review",
+    ageBracket: "16-18" as const,
     isUnder16Applicable: true,
     impactScore: 4,
     likelihoodScore: 4,
     confidenceScore: 4,
     chiliScore: 5,
     summary: "Committee review discusses additional default safety controls for youth-targeted feeds.",
+    businessImpact: "Potential mandatory safety defaults for teen users across EU.",
     effectiveDate: "2026-07-15",
     publishedDate: "2026-01-30",
-    sourceName: "European Commission",
+    sourceUrl: "https://digital-strategy.ec.europa.eu",
+    reliabilityTier: 5,
     createdAt: "2026-01-15T12:00:00.000Z",
     updatedAt: "2026-02-09T12:00:00.000Z",
   },
@@ -130,15 +71,18 @@ const events: SeedEvent[] = [
     jurisdictionCountry: "United Kingdom",
     jurisdictionState: null,
     stage: "enacted",
+    ageBracket: "13-15" as const,
     isUnder16Applicable: true,
     impactScore: 3,
     likelihoodScore: 3,
     confidenceScore: 4,
     chiliScore: 4,
     summary: "Enforcement penalties clarified for noncompliant age verification flows.",
+    businessImpact: "Financial penalties for failure to implement proper age verification in UK.",
     effectiveDate: "2026-01-20",
     publishedDate: "2025-12-12",
-    sourceName: "UK Office of Communications",
+    sourceUrl: "https://www.ofcom.org.uk",
+    reliabilityTier: 5,
     createdAt: "2025-12-01T11:00:00.000Z",
     updatedAt: "2026-02-03T10:00:00.000Z",
   },
@@ -148,71 +92,83 @@ const events: SeedEvent[] = [
     jurisdictionCountry: "Singapore",
     jurisdictionState: null,
     stage: "effective",
+    ageBracket: "unknown" as const,
     isUnder16Applicable: false,
     impactScore: 3,
     likelihoodScore: 2,
     confidenceScore: 4,
     chiliScore: 4,
     summary: "Data-controller obligations updated with clearer consent documentation requirements.",
+    businessImpact: "Updated consent requirements for processing minor data in Singapore.",
     effectiveDate: "2025-09-01",
     publishedDate: "2025-08-15",
-    sourceName: "Singapore Government Gazette",
+    sourceUrl: "https://www.pdpc.gov.sg",
+    reliabilityTier: 5,
     createdAt: "2025-08-16T09:15:00.000Z",
     updatedAt: "2026-01-28T08:30:00.000Z",
   },
   {
     id: "11111111-1111-1111-1111-111111111106",
-    title: "Brazil LGPD Under-16 Update Monitoring Note",
-    jurisdictionCountry: "Brazil",
-    jurisdictionState: null,
-    stage: "passed",
-    isUnder16Applicable: false,
-    impactScore: 2,
-    likelihoodScore: 3,
-    confidenceScore: 3,
-    chiliScore: 3,
-    summary: "General compliance update with no direct under-16 platform feature changes required yet.",
-    effectiveDate: "2026-03-12",
-    publishedDate: "2026-01-18",
-    sourceName: "European Commission",
-    createdAt: "2026-01-18T08:45:00.000Z",
-    updatedAt: "2026-01-25T13:30:00.000Z",
-  },
-  {
-    id: "11111111-1111-1111-1111-111111111107",
     title: "Australia Minor Services Consultation",
     jurisdictionCountry: "Australia",
     jurisdictionState: null,
     stage: "introduced",
+    ageBracket: "both" as const,
     isUnder16Applicable: true,
     impactScore: 2,
     likelihoodScore: 2,
     confidenceScore: 3,
     chiliScore: 2,
     summary: "New public consultation on default feed-limits and parental control notices.",
+    businessImpact: "May require parental control features and default limits for minor users.",
     effectiveDate: null,
     publishedDate: "2026-01-22",
-    sourceName: "US Federal Register",
+    sourceUrl: "https://www.esafety.gov.au",
+    reliabilityTier: 5,
     createdAt: "2026-01-22T14:20:00.000Z",
     updatedAt: "2026-01-29T11:11:00.000Z",
   },
   {
-    id: "11111111-1111-1111-1111-111111111108",
+    id: "11111111-1111-1111-1111-111111111107",
     title: "India Emerging Digital Advertising Rules",
     jurisdictionCountry: "India",
     jurisdictionState: null,
     stage: "amended",
+    ageBracket: "13-15" as const,
     isUnder16Applicable: true,
     impactScore: 1,
     likelihoodScore: 2,
     confidenceScore: 3,
     chiliScore: 2,
     summary: "Ad disclosure additions for minor audiences in beta product categories.",
+    businessImpact: "Additional disclosures required for advertising to minors in India.",
     effectiveDate: "2026-05-01",
     publishedDate: "2025-11-10",
-    sourceName: "UK Office of Communications",
+    sourceUrl: "https://meity.gov.in",
+    reliabilityTier: 4,
     createdAt: "2025-11-11T17:55:00.000Z",
     updatedAt: "2026-01-10T07:05:00.000Z",
+  },
+  {
+    id: "11111111-1111-1111-1111-111111111108",
+    title: "Canada Privacy Act Updates for Youth",
+    jurisdictionCountry: "Canada",
+    jurisdictionState: null,
+    stage: "committee_review",
+    ageBracket: "16-18" as const,
+    isUnder16Applicable: true,
+    impactScore: 3,
+    likelihoodScore: 3,
+    confidenceScore: 4,
+    chiliScore: 3,
+    summary: "Parliamentary review of enhanced privacy protections for youth.",
+    businessImpact: "May require updated consent mechanisms for teen users in Canada.",
+    effectiveDate: "2026-09-01",
+    publishedDate: "2026-01-15",
+    sourceUrl: "https://www.priv.gc.ca",
+    reliabilityTier: 5,
+    createdAt: "2026-01-16T10:00:00.000Z",
+    updatedAt: "2026-02-01T15:30:00.000Z",
   },
 ];
 
@@ -222,56 +178,42 @@ export function seedSampleData(db: DatabaseConstructor.Database): void {
     return;
   }
 
-  const sourceUpsert = db.prepare(
-    `
-    INSERT OR IGNORE INTO sources (name, url, authority_type, jurisdiction, created_at)
-    VALUES (?, ?, ?, ?, ?)
-    `,
-  );
-  const sourceLookup = db.prepare("SELECT id, name FROM sources");
+  const now = new Date().toISOString();
+
   const insertEvent = db.prepare(`
     INSERT OR REPLACE INTO regulation_events (
-      id, title, jurisdiction_country, jurisdiction_state, stage,
-      is_under16_applicable, impact_score, likelihood_score, confidence_score,
-      chili_score, summary, effective_date, published_date, source_id, created_at, updated_at
+      id, title, jurisdiction_country, jurisdiction_state, stage, age_bracket,
+      is_under16_applicable, impact_score, likelihood_score, confidence_score, chili_score,
+      summary, business_impact, required_solutions, competitor_responses,
+      effective_date, published_date, source_url, raw_content, reliability_tier,
+      status, last_crawled_at, created_at, updated_at
     ) VALUES (
-      @id, @title, @jurisdictionCountry, @jurisdictionState, @stage,
-      @isUnder16Applicable, @impactScore, @likelihoodScore, @confidenceScore,
-      @chiliScore, @summary, @effectiveDate, @publishedDate, @sourceId, @createdAt, @updatedAt
+      @id, @title, @jurisdictionCountry, @jurisdictionState, @stage, @ageBracket,
+      @isUnder16Applicable, @impactScore, @likelihoodScore, @confidenceScore, @chiliScore,
+      @summary, @businessImpact, '[]', '[]',
+      @effectiveDate, @publishedDate, @sourceUrl, '', @reliabilityTier,
+      'new', @updatedAt, @createdAt, @updatedAt
     )
   `);
 
-  const txn = db.transaction(() => {
-    for (const source of sources) {
-      sourceUpsert.run(source.name, source.url, source.authorityType, source.jurisdiction, new Date().toISOString());
+  for (const event of events) {
+    const validation = validateScoringBounds({
+      impactScore: event.impactScore,
+      likelihoodScore: event.likelihoodScore,
+      confidenceScore: event.confidenceScore,
+      chiliScore: event.chiliScore,
+    });
+
+    if (!validation.valid) {
+      throw new Error(`Invalid seed score for event ${event.id}: ${validation.errors.join(", ")}`);
     }
 
-    const sourceMap = new Map<string, number>((sourceLookup.all() as Array<{ id: number; name: string }>).map((row) => [row.name, row.id]));
-
-    for (const event of events) {
-      const validation = validateScoringBounds({
-        impactScore: event.impactScore,
-        likelihoodScore: event.likelihoodScore,
-        confidenceScore: event.confidenceScore,
-        chiliScore: event.chiliScore,
-      });
-
-      if (!validation.valid) {
-        throw new Error(`Invalid seed score for event ${event.id}: ${validation.errors.join(", ")}`);
-      }
-
-      const sourceId = sourceMap.get(event.sourceName);
-      if (!sourceId) {
-        throw new Error(`Source not found for event ${event.id}: ${event.sourceName}`);
-      }
-
-      insertEvent.run({
-        ...event,
-        sourceId,
-        isUnder16Applicable: event.isUnder16Applicable ? 1 : 0,
-      });
-    }
-  });
-
-  txn();
+    insertEvent.run({
+      ...event,
+      jurisdictionState: event.jurisdictionState || null,
+      isUnder16Applicable: event.isUnder16Applicable ? 1 : 0,
+      businessImpact: event.businessImpact,
+      effectiveDate: event.effectiveDate || null,
+    });
+  }
 }

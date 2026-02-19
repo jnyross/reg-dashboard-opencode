@@ -2,8 +2,10 @@ const API_BASE = 'http://localhost:3001/api';
 
 let currentPage = 1;
 let currentJurisdiction = '';
+let currentAgeBracket = '';
 let currentMinRisk = '';
 let lastUpdated = null;
+let lastCrawled = null;
 
 function showError(message) {
   const banner = document.getElementById('error-banner');
@@ -20,6 +22,22 @@ function getChiliHTML(score) {
   const filled = '🌶️'.repeat(score);
   const empty = '○'.repeat(5 - score);
   return `<span class="chili">${filled}${empty}</span>`;
+}
+
+function getReliabilityHTML(tier) {
+  if (!tier) return '';
+  const stars = '★'.repeat(tier) + '☆'.repeat(5 - tier);
+  return `<span class="reliability" title="Source reliability: ${tier}/5">${stars}</span>`;
+}
+
+function getAgeBracketLabel(bracket) {
+  const labels = {
+    '13-15': '13-15',
+    '16-18': '16-18',
+    'both': '13-18',
+    'unknown': 'All'
+  };
+  return labels[bracket] || bracket || '';
 }
 
 function formatDate(isoString) {
@@ -54,11 +72,14 @@ function renderBriefItems(items) {
       <div class="title">${escapeHTML(item.title)}</div>
       <div class="meta">
         <span class="jurisdiction">${escapeHTML(formatJurisdiction(item))}</span>
+        ${item.ageBracket ? `<span class="age-bracket">Age: ${getAgeBracketLabel(item.ageBracket)}</span>` : ''}
         <span class="stage stage-${item.stage}">${item.stage.replace('_', ' ')}</span>
         <span class="chili">${getChiliHTML(item.chiliScore || item.scores?.chili || 1)}</span>
+        ${item.reliabilityTier ? getReliabilityHTML(item.reliabilityTier) : ''}
       </div>
       <div class="reason">${escapeHTML(item.summary || 'No summary available')}</div>
       ${item.source?.url ? `<a href="${escapeHTML(item.source.url)}" target="_blank" rel="noopener" class="source-link">View Source →</a>` : ''}
+      ${item.lastCrawledAt ? `<span class="crawled-at">Crawled: ${formatDate(item.lastCrawledAt)}</span>` : ''}
     </div>
   `).join('');
 }
@@ -77,9 +98,10 @@ function renderEventsTable(data) {
         <tr>
           <th>Title</th>
           <th>Jurisdiction</th>
+          <th>Age</th>
           <th>Stage</th>
           <th>Risk</th>
-          <th>Source</th>
+          <th>Reliability</th>
           <th>Feedback</th>
         </tr>
       </thead>
@@ -92,11 +114,10 @@ function renderEventsTable(data) {
               </a>
             </td>
             <td>${escapeHTML(formatJurisdiction(item))}</td>
+            <td>${getAgeBracketLabel(item.ageBracket)}</td>
             <td><span class="stage stage-${item.stage}">${item.stage.replace('_', ' ')}</span></td>
             <td class="chili-cell">${getChiliHTML(item.scores?.chili || 1)}</td>
-            <td class="source-cell">
-              ${item.source?.url ? `<a href="${escapeHTML(item.source.url)}" target="_blank" rel="noopener">${escapeHTML(item.source.name)}</a>` : escapeHTML(item.source?.name || '')}
-            </td>
+            <td>${item.reliabilityTier ? getReliabilityHTML(item.reliabilityTier) : ''}</td>
             <td class="feedback-cell">
               <button class="feedback-btn good" onclick="submitFeedback('${item.id}', 'good')" title="Mark as good">👍 Good</button>
               <button class="feedback-btn bad" onclick="submitFeedback('${item.id}', 'bad')" title="Mark as bad">👎 Bad</button>
@@ -195,6 +216,9 @@ async function fetchEvents(page = 1) {
     if (currentJurisdiction) {
       params.set('jurisdiction', currentJurisdiction);
     }
+    if (currentAgeBracket) {
+      params.set('ageBracket', currentAgeBracket);
+    }
     if (currentMinRisk) {
       params.set('minRisk', currentMinRisk);
     }
@@ -247,6 +271,44 @@ function showEventDetail(eventId) {
   console.log('Show detail for event:', eventId);
 }
 
+async function triggerCrawl() {
+  const btn = document.getElementById('crawl-btn');
+  btn.disabled = true;
+  btn.textContent = 'Crawling...';
+  
+  try {
+    const response = await fetch(`${API_BASE}/crawl`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({})
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Crawl API error: ${response.status}`);
+    }
+    
+    const result = await response.json();
+    console.log('Crawl result:', result);
+    
+    lastCrawled = new Date().toISOString();
+    document.getElementById('last-crawled').textContent = formatDate(lastCrawled);
+    
+    showError(`Crawl complete! Items saved: ${result.itemsSaved}`);
+    setTimeout(hideError, 5000);
+    
+    fetchBrief();
+    fetchEvents();
+  } catch (error) {
+    console.error('Error triggering crawl:', error);
+    showError(`Failed to run crawl: ${error.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 Run Crawl';
+  }
+}
+
 function goToPage(page) {
   currentPage = page;
   fetchEvents(page);
@@ -255,6 +317,7 @@ function goToPage(page) {
 function applyFilters() {
   currentPage = 1;
   currentJurisdiction = document.getElementById('jurisdiction-filter').value;
+  currentAgeBracket = document.getElementById('age-bracket-filter').value;
   currentMinRisk = document.getElementById('min-risk-filter').value;
   fetchEvents(currentPage);
 }
@@ -262,8 +325,10 @@ function applyFilters() {
 function clearFilters() {
   currentPage = 1;
   currentJurisdiction = '';
+  currentAgeBracket = '';
   currentMinRisk = '';
   document.getElementById('jurisdiction-filter').value = '';
+  document.getElementById('age-bracket-filter').value = '';
   document.getElementById('min-risk-filter').value = '';
   fetchEvents(currentPage);
 }

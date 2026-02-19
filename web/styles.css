@@ -56,6 +56,11 @@ header {
 .header-content {
   max-width: 1400px;
   margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 16px;
 }
 
 h1 {
@@ -67,6 +72,10 @@ h1 {
   color: var(--text-secondary);
   font-size: 0.875rem;
   margin: 0;
+}
+
+#crawl-btn {
+  margin-top: 8px;
 }
 
 main {
@@ -150,6 +159,27 @@ section {
 .chili {
   font-size: 1.25rem;
   letter-spacing: 2px;
+}
+
+.reliability {
+  color: #f59e0b;
+  font-size: 0.875rem;
+}
+
+.age-bracket {
+  background: #e0e7ff;
+  color: #3730a3;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.brief-card .crawled-at {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-top: 8px;
 }
 
 .brief-card .reason {
