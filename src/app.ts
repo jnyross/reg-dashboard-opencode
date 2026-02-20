@@ -1,4 +1,5 @@
 import express, { Request, Response } from "express";
+import path from "node:path";
 import DatabaseConstructor from "better-sqlite3";
 import { runPipeline } from "./pipeline";
 
@@ -223,6 +224,7 @@ function createBriefSelect(sqlLimit: number): string {
 export function createApp(db: DatabaseConstructor.Database) {
   const app = express();
   app.use(express.json());
+  app.use(express.static(path.join(process.cwd(), "web"));
 
   app.get("/api/health", (req: Request, res: Response) => {
     res.json({
