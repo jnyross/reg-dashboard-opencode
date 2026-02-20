@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { XMLParser } from "fast-xml-parser";
 import TurndownService from "turndown";
 import { RegulatorySource, sources, twitterSearchSources } from "./sources";
@@ -287,10 +288,22 @@ export async function crawlSource(source: RegulatorySource): Promise<CrawlResult
   return result;
 }
 
+function normalizeTextForHash(text: string): string {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function hashText(text: string): string {
+  return crypto.createHash("sha1").update(normalizeTextForHash(text)).digest("hex");
+}
+
 function dedupeItems(items: CrawledItem[]): CrawledItem[] {
   const deduped = new Map<string, CrawledItem>();
   for (const item of items) {
-    const key = `${item.url.toLowerCase()}::${item.title.toLowerCase()}`;
+    const normalizedUrl = item.url.trim().toLowerCase();
+    const textHash = hashText(item.content || item.title);
+    const key = normalizedUrl
+      ? `${item.sourceId}::${normalizedUrl}`
+      : `${item.sourceId}::text:${textHash}`;
     if (!deduped.has(key)) {
       deduped.set(key, item);
     }

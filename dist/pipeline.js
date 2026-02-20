@@ -1,10 +1,30 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runPipeline = runPipeline;
+const node_crypto_1 = __importDefault(require("node:crypto"));
 const sources_1 = require("./sources");
 const crawler_1 = require("./crawler");
 const analyzer_1 = require("./analyzer");
 const db_1 = require("./db");
+function normalizeForHash(value) {
+    return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+function hashText(value) {
+    return node_crypto_1.default.createHash("sha1").update(normalizeForHash(value)).digest("hex");
+}
+function buildRegulationKey(country, state, title) {
+    return [normalizeForHash(country || "unknown"), normalizeForHash(state || ""), normalizeForHash(title || "untitled")].join("|");
+}
+function buildDeduplicationKey(item, jurisdictionCountry, jurisdictionState) {
+    const regulationKey = buildRegulationKey(jurisdictionCountry, jurisdictionState, item.title);
+    const normalizedUrl = item.url.trim().toLowerCase();
+    const textHash = hashText(item.content || item.title);
+    const identity = normalizedUrl || `text:${textHash}`;
+    return `${regulationKey}::${identity}`;
+}
 async function runPipeline(db, sourceIds) {
     const result = {
         sourcesProcessed: 0,
@@ -65,6 +85,7 @@ async function runPipeline(db, sourceIds) {
     }
     const analysisQueue = crawledBundles.flatMap((bundle) => bundle.items.map((item) => ({ item, source: bundle.source, sourceDbId: bundle.sourceDbId })));
     const totalItems = analysisQueue.length;
+    const seenDeduplicationKeys = new Set();
     console.log(`\nCrawl complete: ${result.itemsCrawled} items from ${result.sourcesProcessed} sources`);
     console.log(`Now analyzing ${totalItems} items with MiniMax M2.5...\n`);
     // Phase 2: analyze all crawled items with global concurrency
@@ -81,6 +102,12 @@ async function runPipeline(db, sourceIds) {
                 analyzed.sourceId = sourceDbId.toString();
                 result.itemsAnalyzed += 1;
                 if (analyzed.isRelevant) {
+                    const deduplicationKey = buildDeduplicationKey(item, analyzed.jurisdictionCountry, analyzed.jurisdictionState);
+                    if (seenDeduplicationKeys.has(deduplicationKey)) {
+                        console.log("    → Skipped (duplicate URL/text/regulation key)");
+                        continue;
+                    }
+                    seenDeduplicationKeys.add(deduplicationKey);
                     const saveResult = (0, db_1.upsertAnalyzedItem)(db, analyzed, source.reliabilityTier);
                     result.itemsSaved += 1;
                     console.log(`    → Saved: ${item.title.slice(0, 60)}${saveResult.statusChanged ? " [STATUS CHANGED]" : ""}`);

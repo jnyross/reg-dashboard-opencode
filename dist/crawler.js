@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.crawlSource = crawlSource;
 exports.crawlAllSources = crawlAllSources;
+const node_crypto_1 = __importDefault(require("node:crypto"));
 const fast_xml_parser_1 = require("fast-xml-parser");
 const turndown_1 = __importDefault(require("turndown"));
 const sources_1 = require("./sources");
@@ -249,10 +250,20 @@ async function crawlSource(source) {
     }
     return result;
 }
+function normalizeTextForHash(text) {
+    return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+function hashText(text) {
+    return node_crypto_1.default.createHash("sha1").update(normalizeTextForHash(text)).digest("hex");
+}
 function dedupeItems(items) {
     const deduped = new Map();
     for (const item of items) {
-        const key = `${item.url.toLowerCase()}::${item.title.toLowerCase()}`;
+        const normalizedUrl = item.url.trim().toLowerCase();
+        const textHash = hashText(item.content || item.title);
+        const key = normalizedUrl
+            ? `${item.sourceId}::${normalizedUrl}`
+            : `${item.sourceId}::text:${textHash}`;
         if (!deduped.has(key)) {
             deduped.set(key, item);
         }

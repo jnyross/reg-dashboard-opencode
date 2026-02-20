@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import DatabaseConstructor from "better-sqlite3";
 import { sources, twitterSearchSources, RegulatorySource } from "./sources";
 import { crawlSource, CrawledItem } from "./crawler";
@@ -18,6 +19,26 @@ interface CrawledBundle {
   source: RegulatorySource;
   sourceDbId: number;
   items: CrawledItem[];
+}
+
+function normalizeForHash(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function hashText(value: string): string {
+  return crypto.createHash("sha1").update(normalizeForHash(value)).digest("hex");
+}
+
+function buildRegulationKey(country: string, state: string | undefined, title: string): string {
+  return [normalizeForHash(country || "unknown"), normalizeForHash(state || ""), normalizeForHash(title || "untitled")].join("|");
+}
+
+function buildDeduplicationKey(item: CrawledItem, jurisdictionCountry: string, jurisdictionState: string | undefined): string {
+  const regulationKey = buildRegulationKey(jurisdictionCountry, jurisdictionState, item.title);
+  const normalizedUrl = item.url.trim().toLowerCase();
+  const textHash = hashText(item.content || item.title);
+  const identity = normalizedUrl || `text:${textHash}`;
+  return `${regulationKey}::${identity}`;
 }
 
 export async function runPipeline(
@@ -98,6 +119,7 @@ export async function runPipeline(
   );
 
   const totalItems = analysisQueue.length;
+  const seenDeduplicationKeys = new Set<string>();
 
   console.log(`\nCrawl complete: ${result.itemsCrawled} items from ${result.sourcesProcessed} sources`);
   console.log(`Now analyzing ${totalItems} items with MiniMax M2.5...\n`);
@@ -121,6 +143,18 @@ export async function runPipeline(
           result.itemsAnalyzed += 1;
 
           if (analyzed.isRelevant) {
+            const deduplicationKey = buildDeduplicationKey(
+              item,
+              analyzed.jurisdictionCountry,
+              analyzed.jurisdictionState,
+            );
+
+            if (seenDeduplicationKeys.has(deduplicationKey)) {
+              console.log("    → Skipped (duplicate URL/text/regulation key)");
+              continue;
+            }
+            seenDeduplicationKeys.add(deduplicationKey);
+
             const saveResult = upsertAnalyzedItem(db, analyzed, source.reliabilityTier);
             result.itemsSaved += 1;
             console.log(
