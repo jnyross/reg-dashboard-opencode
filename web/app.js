@@ -194,7 +194,7 @@ function renderBrief(items) {
       <p>${escapeHtml(item.summary || '')}</p>
       <div class="subtle">Last crawled: ${formatDate(item.lastCrawledAt)}</div>
       <div class="action-row">
-        <button class="btn" onclick="openEvent('${item.id}')">Open</button>
+        <button class="btn" onclick="openLaw('${item.id}')">Open</button>
         ${item.source?.url ? `<a class="btn" href="${escapeHtml(item.source.url)}" target="_blank" rel="noopener">Source ↗</a>` : ''}
       </div>
     </article>
@@ -304,10 +304,10 @@ async function loadEvents(page = 1) {
   if (currentFilters.under16Only) params.set('under16Only', 'true');
 
   try {
-    const data = await apiJson(`/events?${params.toString()}`);
+    const data = await apiJson(`/laws?${params.toString()}`);
     renderEventsTable(data.items || []);
     renderEventsPagination(data.page, data.totalPages);
-    document.getElementById('events-meta').textContent = `Showing ${data.items.length} of ${data.total} events`;
+    document.getElementById('events-meta').textContent = `Showing ${data.items.length} of ${data.total} laws`;
     document.getElementById('last-crawled').textContent = formatDate(data.lastCrawledAt);
   } catch (error) {
     showToast(`Events load failed: ${error.message}`, true);
@@ -326,30 +326,27 @@ function renderEventsTable(items) {
     <table>
       <thead>
         <tr>
-          <th>Title</th>
+          <th>Law</th>
           <th>Jurisdiction</th>
           <th>Stage</th>
           <th>Age</th>
           <th>Risk</th>
-          <th>Updated</th>
+          <th>Updates</th>
+          <th>Latest</th>
           <th>Source</th>
-          <th>Feedback</th>
         </tr>
       </thead>
       <tbody>
         ${items.map((item) => `
           <tr>
-            <td><a href="#" onclick="openEvent('${item.id}'); return false;">${escapeHtml(item.title)}</a></td>
+            <td><a href="#" onclick="openLaw('${item.id}'); return false;">${escapeHtml(item.title)}</a></td>
             <td>${escapeHtml(item.jurisdiction.flag || '🌍')} ${escapeHtml(item.jurisdiction.country)}${item.jurisdiction.state ? `, ${escapeHtml(item.jurisdiction.state)}` : ''}</td>
             <td><span class="tag">${escapeHtml(stageLabel(item.stage))}</span></td>
             <td>${escapeHtml(item.ageBracket || 'unknown')}</td>
             <td>${chili(item.scores?.chili)}</td>
-            <td>${formatDate(item.updatedAt)}</td>
+            <td>${escapeHtml(String(item.updateCount || 0))}</td>
+            <td>${formatDate(item.latestUpdateAt || item.updatedAt)}</td>
             <td>${item.source?.url ? `<a href="${escapeHtml(item.source.url)}" target="_blank" rel="noopener">link ↗</a>` : '—'}</td>
-            <td>
-              <button class="btn" onclick="submitFeedback('${item.id}', 'good')">👍</button>
-              <button class="btn" onclick="submitFeedback('${item.id}', 'bad')">👎</button>
-            </td>
           </tr>
         `).join('')}
       </tbody>
@@ -439,53 +436,30 @@ async function deleteSavedSearch() {
   }
 }
 
-async function openEvent(eventId) {
+async function openLaw(lawId) {
   try {
-    const event = await apiJson(`/events/${eventId}`);
+    const law = await apiJson(`/laws/${lawId}`);
     const dialog = document.getElementById('event-dialog');
 
     document.getElementById('event-dialog-body').innerHTML = `
-      <h3>${escapeHtml(event.title)}</h3>
+      <h3>${escapeHtml(law.title)}</h3>
       <div class="event-detail-grid">
-        <div class="detail-item"><div class="label">Jurisdiction</div>${escapeHtml(event.jurisdiction.country)}${event.jurisdiction.state ? `, ${escapeHtml(event.jurisdiction.state)}` : ''}</div>
-        <div class="detail-item"><div class="label">Stage</div>${escapeHtml(stageLabel(event.stage))}</div>
-        <div class="detail-item"><div class="label">Risk</div>${chili(event.scores?.chili)}</div>
-        <div class="detail-item"><div class="label">Age Bracket</div>${escapeHtml(event.ageBracket || 'unknown')}</div>
-        <div class="detail-item full"><div class="label">Summary</div>${escapeHtml(event.summary || '')}</div>
-        <div class="detail-item full"><div class="label">Business Impact</div>${escapeHtml(event.businessImpact || '')}</div>
-        <div class="detail-item full"><div class="label">Regulatory Timeline</div>${(event.regulatoryTimeline || []).map((t) => `${escapeHtml(stageLabel(t.previousStage || 'start'))} → ${escapeHtml(stageLabel(t.newStage))} (${formatDate(t.changedAt)})`).join('<br>')}</div>
-        <div class="detail-item full"><div class="label">Related Events</div>${(event.relatedEvents || []).map((related) => `<a href="#" onclick="openEvent('${related.id}'); return false;">${escapeHtml(related.title)}</a>`).join('<br>') || 'None'}</div>
-        <div class="detail-item full"><div class="label">Feedback History</div>${(event.feedback || []).map((feedback) => `${feedback.rating === 'good' ? '👍' : '👎'} ${escapeHtml(feedback.note || '')} (${formatDate(feedback.createdAt)})`).join('<br>') || 'None'}</div>
-      </div>
-
-      <h4>Edit Event</h4>
-      <div class="filters-grid compact">
-        <input id="edit-title" value="${escapeHtmlAttr(event.title)}" />
-        <select id="edit-stage">
-          ${['proposed','introduced','committee_review','passed','enacted','effective','amended','withdrawn','rejected']
-            .map((stage) => `<option value="${stage}" ${stage === event.stage ? 'selected' : ''}>${stageLabel(stage)}</option>`)
-            .join('')}
-        </select>
-        <select id="edit-age-bracket">
-          ${['13-15','16-18','both','unknown']
-            .map((age) => `<option value="${age}" ${age === event.ageBracket ? 'selected' : ''}>${age}</option>`)
-            .join('')}
-        </select>
-      </div>
-      <div class="filters-grid compact">
-        <textarea id="edit-summary" rows="4">${escapeHtml(event.summary || '')}</textarea>
-        <textarea id="edit-impact" rows="4">${escapeHtml(event.businessImpact || '')}</textarea>
-      </div>
-      <div class="action-row">
-        <button class="btn primary" onclick="saveEventEdits('${event.id}')">Save Edits</button>
-        <button class="btn" onclick="submitFeedback('${event.id}', 'good')">👍 Good</button>
-        <button class="btn" onclick="submitFeedback('${event.id}', 'bad')">👎 Bad</button>
+        <div class="detail-item"><div class="label">Jurisdiction</div>${escapeHtml(law.jurisdiction.country)}${law.jurisdiction.state ? `, ${escapeHtml(law.jurisdiction.state)}` : ''}</div>
+        <div class="detail-item"><div class="label">Stage</div>${escapeHtml(stageLabel(law.stage))}</div>
+        <div class="detail-item"><div class="label">Risk</div>${chili(law.scores?.chili)}</div>
+        <div class="detail-item"><div class="label">Age Bracket</div>${escapeHtml(law.ageBracket || 'unknown')}</div>
+        <div class="detail-item"><div class="label">Update Count</div>${escapeHtml(String(law.updateCount || 0))}</div>
+        <div class="detail-item"><div class="label">Latest Update</div>${formatDate(law.latestUpdateAt)}</div>
+        <div class="detail-item full"><div class="label">Summary</div>${escapeHtml(law.summary || '')}</div>
+        <div class="detail-item full"><div class="label">Business Impact</div>${escapeHtml(law.businessImpact || '')}</div>
+        <div class="detail-item full"><div class="label">Update Timeline</div>${(law.updateTimeline || []).map((t) => `${escapeHtml(stageLabel(t.stage || 'unknown'))} • ${formatDate(t.publishedDate || t.capturedAt)} • ${chili(t.scores?.chili || 1)}<br>${escapeHtml(t.summary || '')}`).join('<br><br>') || 'None'}</div>
+        <div class="detail-item full"><div class="label">Related Laws</div>${(law.relatedLaws || []).map((related) => `<a href="#" onclick="openLaw('${related.id}'); return false;">${escapeHtml(related.title)}</a>`).join('<br>') || 'None'}</div>
       </div>
     `;
 
     dialog.showModal();
   } catch (error) {
-    showToast(`Failed to open event: ${error.message}`, true);
+    showToast(`Failed to open law: ${error.message}`, true);
   }
 }
 
@@ -590,7 +564,7 @@ async function loadCompetitors() {
             <tr>
               ${idx === 0 ? `<td rowspan="${data.comparison[name].length}"><strong>${escapeHtml(name)}</strong></td>` : ''}
               <td>${escapeHtml(entry.response)}</td>
-              <td><a href="#" onclick="openEvent('${entry.eventId}'); return false;">${escapeHtml(entry.eventTitle)}</a></td>
+              <td><a href="#" onclick="openLaw('${entry.lawId}'); return false;">${escapeHtml(entry.lawTitle)}</a></td>
               <td>${escapeHtml(entry.jurisdiction)}</td>
               <td>${formatDate(entry.updatedAt)}</td>
             </tr>

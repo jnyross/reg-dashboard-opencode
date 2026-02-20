@@ -39,16 +39,21 @@ describe("scoring validation", () => {
 });
 
 describe("API core endpoints", () => {
-  it("GET /api/brief includes lastCrawledAt and deterministic ordering", async () => {
+  it("GET /api/brief includes lastCrawledAt and law-first fields", async () => {
     const { app, db } = buildTestApp();
 
     const response = await request(app).get("/api/brief?limit=3");
     expect(response.status).toBe(200);
     expect(response.body.items).toHaveLength(3);
 
-    expect(response.body.items[0].id).toBe("11111111-1111-1111-1111-111111111101");
-    expect(response.body.items[1].id).toBe("11111111-1111-1111-1111-111111111102");
-    expect(response.body.items[2].id).toBe("11111111-1111-1111-1111-111111111103");
+    expect(response.body.items[0]).toEqual(
+      expect.objectContaining({
+        id: expect.any(Number),
+        lawKey: expect.any(String),
+        canonicalTitle: expect.any(String),
+        updateCount: expect.any(Number),
+      })
+    );
 
     expect(response.body).toHaveProperty("lastCrawledAt");
     db.close();
@@ -94,6 +99,31 @@ describe("API core endpoints", () => {
     const jurisdictions = await request(app).get("/api/analytics/jurisdictions");
     expect(jurisdictions.status).toBe(200);
     expect(Array.isArray(jurisdictions.body.jurisdictions)).toBe(true);
+
+    db.close();
+  });
+
+  it("/api/laws list + detail returns update timeline", async () => {
+    const { app, db } = buildTestApp();
+
+    const laws = await request(app).get("/api/laws?limit=5");
+    expect(laws.status).toBe(200);
+    expect(Array.isArray(laws.body.items)).toBe(true);
+    expect(laws.body.items.length).toBeGreaterThan(0);
+
+    const first = laws.body.items[0];
+    expect(first).toEqual(
+      expect.objectContaining({
+        id: expect.any(Number),
+        lawKey: expect.any(String),
+        updateCount: expect.any(Number),
+      })
+    );
+
+    const detail = await request(app).get(`/api/laws/${first.id}`);
+    expect(detail.status).toBe(200);
+    expect(Array.isArray(detail.body.updateTimeline)).toBe(true);
+    expect(detail.body.updateTimeline.length).toBeGreaterThan(0);
 
     db.close();
   });

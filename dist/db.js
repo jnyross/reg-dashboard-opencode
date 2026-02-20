@@ -13,6 +13,7 @@ const node_path_1 = __importDefault(require("node:path"));
 const node_crypto_1 = __importDefault(require("node:crypto"));
 const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 const data_cleaner_1 = require("./data-cleaner");
+const laws_1 = require("./laws");
 exports.databasePathDefault = node_path_1.default.join(process.cwd(), "data", "reg-regulation-dashboard.sqlite");
 const allowedStages = [
     "proposed",
@@ -180,6 +181,7 @@ function initializeSchema(db) {
         const now = new Date().toISOString();
         db.prepare("INSERT INTO alert_configs (email, frequency, min_chili, webhook_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run(null, "daily", 4, null, now, now);
     }
+    (0, laws_1.ensureLawSchema)(db);
 }
 function upsertSource(db, source) {
     const now = new Date().toISOString();
@@ -290,6 +292,31 @@ function upsertAnalyzedItem(db, item, reliabilityTier) {
     else if (statusChanged && existing) {
         db.prepare("INSERT INTO event_stage_history (event_id, previous_stage, new_stage, changed_at, note) VALUES (?, ?, ?, ?, ?)").run(eventId, existing.stage, item.stage, now, "Stage updated via pipeline");
     }
+    (0, laws_1.upsertLawWithUpdate)(db, {
+        title: cleanedTitle,
+        jurisdictionCountry: item.jurisdictionCountry,
+        jurisdictionState: item.jurisdictionState || undefined,
+        stage: item.stage,
+        ageBracket: normalizedAgeBracket,
+        isUnder16Applicable: Boolean(isUnder16Applicable),
+        impactScore: item.impactScore,
+        likelihoodScore: item.likelihoodScore,
+        confidenceScore: item.confidenceScore,
+        chiliScore: item.chiliScore,
+        summary: cleanedSummary,
+        businessImpact: cleanedImpact,
+        requiredSolutions: item.requiredSolutions || [],
+        competitorResponses: item.competitorResponses || [],
+        effectiveDate: null,
+        publishedDate: item.publishedDate || null,
+        sourceUrl: item.url,
+        rawContent: cleanedRawContent,
+        reliabilityTier,
+        status: status,
+        lastCrawledAt: now,
+        createdAt,
+        updatedAt: now,
+    }, eventId);
     return { id: eventId, isNew, statusChanged };
 }
 //# sourceMappingURL=db.js.map

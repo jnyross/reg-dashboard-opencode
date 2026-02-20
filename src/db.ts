@@ -5,6 +5,7 @@ import DatabaseConstructor from "better-sqlite3";
 import { AnalyzedItem } from "./analyzer";
 import { ReliabilityTier } from "./sources";
 import { cleanText, cleanTitle, generateSummaryFromContent, isGarbageText, isUnder16Related } from "./data-cleaner";
+import { ensureLawSchema, upsertLawWithUpdate } from "./laws";
 
 export const databasePathDefault = path.join(process.cwd(), "data", "reg-regulation-dashboard.sqlite");
 
@@ -182,6 +183,8 @@ export function initializeSchema(db: DatabaseConstructor.Database): void {
       "INSERT INTO alert_configs (email, frequency, min_chili, webhook_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
     ).run(null, "daily", 4, null, now, now);
   }
+
+  ensureLawSchema(db);
 }
 
 export function upsertSource(
@@ -380,6 +383,36 @@ export function upsertAnalyzedItem(
       "INSERT INTO event_stage_history (event_id, previous_stage, new_stage, changed_at, note) VALUES (?, ?, ?, ?, ?)"
     ).run(eventId, existing.stage, item.stage, now, "Stage updated via pipeline");
   }
+
+  upsertLawWithUpdate(
+    db,
+    {
+      title: cleanedTitle,
+      jurisdictionCountry: item.jurisdictionCountry,
+      jurisdictionState: item.jurisdictionState || undefined,
+      stage: item.stage,
+      ageBracket: normalizedAgeBracket,
+      isUnder16Applicable: Boolean(isUnder16Applicable),
+      impactScore: item.impactScore,
+      likelihoodScore: item.likelihoodScore,
+      confidenceScore: item.confidenceScore,
+      chiliScore: item.chiliScore,
+      summary: cleanedSummary,
+      businessImpact: cleanedImpact,
+      requiredSolutions: item.requiredSolutions || [],
+      competitorResponses: item.competitorResponses || [],
+      effectiveDate: null,
+      publishedDate: item.publishedDate || null,
+      sourceUrl: item.url,
+      rawContent: cleanedRawContent,
+      reliabilityTier,
+      status: status as "new" | "updated" | "status_changed" | "unchanged",
+      lastCrawledAt: now,
+      createdAt,
+      updatedAt: now,
+    },
+    eventId,
+  );
 
   return { id: eventId, isNew, statusChanged };
 }

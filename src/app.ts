@@ -3,6 +3,7 @@ import path from "node:path";
 import DatabaseConstructor from "better-sqlite3";
 import { runPipeline } from "./pipeline";
 import { backfillEventRiskAndJurisdiction } from "./backfill";
+import { syncLawsFromEvents } from "./laws";
 import {
   cleanText,
   cleanTitle,
@@ -79,6 +80,37 @@ type TimelineRow = {
   new_stage: string;
   changed_at: string;
   note: string | null;
+};
+
+type DbLawRow = {
+  id: number;
+  law_key: string;
+  canonical_title: string;
+  display_title: string;
+  jurisdiction_country: string;
+  jurisdiction_state: string | null;
+  stage: Stage;
+  age_bracket: string;
+  is_under16_applicable: number;
+  impact_score: number;
+  likelihood_score: number;
+  confidence_score: number;
+  chili_score: number;
+  summary: string | null;
+  business_impact: string | null;
+  required_solutions: string | null;
+  competitor_responses: string | null;
+  effective_date: string | null;
+  published_date: string | null;
+  source_url: string | null;
+  reliability_tier: number;
+  status: string;
+  last_crawled_at: string | null;
+  first_seen_at: string;
+  latest_update_at: string;
+  update_count: number;
+  created_at: string;
+  updated_at: string;
 };
 
 type SavedSearchRow = {
@@ -349,6 +381,66 @@ function sanitizeEvent(row: DbEventRow) {
   };
 }
 
+function sanitizeLaw(row: DbLawRow) {
+  const cleanedTitle = cleanTitle(row.display_title || row.canonical_title);
+  const cleanedSummary = row.summary && !isGarbageText(row.summary)
+    ? cleanText(row.summary)
+    : generateSummaryFromContent("", cleanedTitle);
+  const cleanedBusinessImpact = row.business_impact && !isGarbageText(row.business_impact)
+    ? cleanText(row.business_impact)
+    : "Requires review for compliance impact on Meta platforms.";
+
+  const inferredUnder16 = isUnder16Related(
+    cleanedTitle,
+    cleanedSummary,
+    "",
+    row.source_url || "",
+  );
+
+  const isUnder16Applicable = Boolean(row.is_under16_applicable) || inferredUnder16;
+  const normalizedAgeBracket = isUnder16Applicable && row.age_bracket === "unknown" ? "both" : row.age_bracket;
+
+  return {
+    id: row.id,
+    lawKey: row.law_key,
+    canonicalTitle: row.canonical_title,
+    title: cleanedTitle,
+    jurisdiction: {
+      country: row.jurisdiction_country,
+      state: row.jurisdiction_state,
+      flag: jurisdictionFlag(row.jurisdiction_country),
+    },
+    stage: row.stage,
+    stageColor: stageColor[row.stage],
+    ageBracket: normalizedAgeBracket,
+    isUnder16Applicable,
+    scores: {
+      impact: row.impact_score,
+      likelihood: row.likelihood_score,
+      confidence: row.confidence_score,
+      chili: row.chili_score,
+    },
+    summary: cleanedSummary,
+    businessImpact: cleanedBusinessImpact,
+    requiredSolutions: jsonArray(row.required_solutions),
+    competitorResponses: jsonArray(row.competitor_responses),
+    effectiveDate: row.effective_date,
+    publishedDate: row.published_date,
+    source: {
+      url: row.source_url,
+      reliabilityTier: row.reliability_tier,
+    },
+    reliabilityTier: row.reliability_tier,
+    status: row.status,
+    firstSeenAt: row.first_seen_at,
+    latestUpdateAt: row.latest_update_at,
+    updateCount: row.update_count,
+    lastCrawledAt: row.last_crawled_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function jurisdictionFlag(country: string): string {
   const mapping: Record<string, string> = {
     "United States": "🇺🇸",
@@ -372,10 +464,18 @@ function jurisdictionFlag(country: string): string {
 }
 
 function getLastCrawledAt(db: DatabaseConstructor.Database): string | null {
-  const row = db.prepare("SELECT MAX(last_crawled_at) AS lastCrawledAt FROM regulation_events").get() as {
+  const lawRow = db.prepare("SELECT MAX(last_crawled_at) AS lastCrawledAt FROM laws").get() as {
     lastCrawledAt: string | null;
   };
-  return row?.lastCrawledAt ?? null;
+
+  if (lawRow?.lastCrawledAt) {
+    return lawRow.lastCrawledAt;
+  }
+
+  const eventRow = db.prepare("SELECT MAX(last_crawled_at) AS lastCrawledAt FROM regulation_events").get() as {
+    lastCrawledAt: string | null;
+  };
+  return eventRow?.lastCrawledAt ?? null;
 }
 
 function startCrawlRun(db: DatabaseConstructor.Database, sourceIds?: string[]): number {
@@ -484,6 +584,66 @@ function buildWhereClause(filters: EventFilters): { where: string; params: (stri
   };
 }
 
+function buildLawWhereClause(filters: EventFilters): { where: string; params: (string | number)[] } {
+  const clauses: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (filters.jurisdictions.length > 0) {
+    const placeholders = filters.jurisdictions.map(() => "?").join(", ");
+    clauses.push(`(l.jurisdiction_country IN (${placeholders}) OR l.jurisdiction_state IN (${placeholders}))`);
+    params.push(...filters.jurisdictions, ...filters.jurisdictions);
+  }
+
+  if (filters.stages.length > 0) {
+    const placeholders = filters.stages.map(() => "?").join(", ");
+    clauses.push(`l.stage IN (${placeholders})`);
+    params.push(...filters.stages);
+  }
+
+  if (filters.ageBrackets.length > 0) {
+    const placeholders = filters.ageBrackets.map(() => "?").join(", ");
+    clauses.push(`l.age_bracket IN (${placeholders})`);
+    params.push(...filters.ageBrackets);
+  }
+
+  if (filters.minRisk !== undefined) {
+    clauses.push("l.chili_score >= ?");
+    params.push(filters.minRisk);
+  }
+
+  if (filters.maxRisk !== undefined) {
+    clauses.push("l.chili_score <= ?");
+    params.push(filters.maxRisk);
+  }
+
+  if (filters.dateFrom) {
+    clauses.push("COALESCE(l.published_date, l.latest_update_at) >= ?");
+    params.push(filters.dateFrom);
+  }
+
+  if (filters.dateTo) {
+    clauses.push("COALESCE(l.published_date, l.latest_update_at) <= ?");
+    params.push(filters.dateTo);
+  }
+
+  if (filters.search) {
+    const like = `%${filters.search.toLowerCase()}%`;
+    clauses.push(
+      "(lower(l.display_title) LIKE ? OR lower(l.canonical_title) LIKE ? OR lower(COALESCE(l.summary, '')) LIKE ? OR lower(COALESCE(l.business_impact, '')) LIKE ? OR lower(COALESCE(l.source_url, '')) LIKE ? OR lower(COALESCE(l.law_key, '')) LIKE ?)"
+    );
+    params.push(like, like, like, like, like, like);
+  }
+
+  if (filters.under16Only) {
+    clauses.push("(l.is_under16_applicable = 1 OR l.age_bracket IN ('13-15', 'both'))");
+  }
+
+  return {
+    where: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "",
+    params,
+  };
+}
+
 function resolveSort(sortBy: string | undefined, sortDirection: string | undefined): string {
   const direction = sortDirection?.toLowerCase() === "asc" ? "ASC" : "DESC";
   const mapping: Record<string, string> = {
@@ -510,6 +670,33 @@ function resolveSort(sortBy: string | undefined, sortDirection: string | undefin
   return mapping[sortBy ?? ""] ?? "e.updated_at DESC";
 }
 
+function resolveLawSort(sortBy: string | undefined, sortDirection: string | undefined): string {
+  const direction = sortDirection?.toLowerCase() === "asc" ? "ASC" : "DESC";
+  const mapping: Record<string, string> = {
+    updated: `l.latest_update_at ${direction}`,
+    updated_at: `l.latest_update_at ${direction}`,
+    date: `COALESCE(l.published_date, l.latest_update_at) ${direction}`,
+    publishedDate: `COALESCE(l.published_date, l.latest_update_at) ${direction}`,
+    risk: `l.chili_score ${direction}, l.impact_score ${direction}`,
+    jurisdiction: `l.jurisdiction_country ${direction}, l.jurisdiction_state ${direction}`,
+    stage: `CASE l.stage
+      WHEN 'proposed' THEN 1
+      WHEN 'introduced' THEN 2
+      WHEN 'committee_review' THEN 3
+      WHEN 'passed' THEN 4
+      WHEN 'enacted' THEN 5
+      WHEN 'effective' THEN 6
+      WHEN 'amended' THEN 7
+      WHEN 'withdrawn' THEN 8
+      WHEN 'rejected' THEN 9
+      ELSE 99 END ${direction}`,
+    update_count: `l.update_count ${direction}, l.latest_update_at ${direction}`,
+    recently_updated: "l.latest_update_at DESC",
+  };
+
+  return mapping[sortBy ?? ""] ?? "l.latest_update_at DESC";
+}
+
 function setPaginationHeaders(res: Response, page: number, limit: number, total: number): void {
   const totalPages = Math.max(1, Math.ceil(total / limit));
   res.setHeader("X-Total-Count", String(total));
@@ -528,31 +715,35 @@ function setPaginationHeaders(res: Response, page: number, limit: number, total:
 function createBriefSelect(sqlLimit: number): string {
   return `
     SELECT
-      e.id,
-      e.title,
-      e.jurisdiction_country,
-      e.jurisdiction_state,
-      e.stage,
-      e.age_bracket,
-      e.is_under16_applicable,
-      e.chili_score,
-      e.summary,
-      e.business_impact,
-      e.effective_date,
-      e.published_date,
-      e.source_url,
-      e.raw_content,
-      e.reliability_tier,
-      e.status,
-      e.last_crawled_at,
-      e.updated_at,
-      e.created_at,
-      e.impact_score,
-      e.likelihood_score,
-      e.confidence_score,
-      e.required_solutions,
-      e.competitor_responses,
-      CASE e.stage
+      l.id,
+      l.law_key,
+      l.canonical_title,
+      l.display_title,
+      l.jurisdiction_country,
+      l.jurisdiction_state,
+      l.stage,
+      l.age_bracket,
+      l.is_under16_applicable,
+      l.chili_score,
+      l.summary,
+      l.business_impact,
+      l.effective_date,
+      l.published_date,
+      l.source_url,
+      l.reliability_tier,
+      l.status,
+      l.last_crawled_at,
+      l.first_seen_at,
+      l.latest_update_at,
+      l.update_count,
+      l.updated_at,
+      l.created_at,
+      l.impact_score,
+      l.likelihood_score,
+      l.confidence_score,
+      l.required_solutions,
+      l.competitor_responses,
+      CASE l.stage
         WHEN 'proposed' THEN 9
         WHEN 'introduced' THEN 8
         WHEN 'committee_review' THEN 7
@@ -563,12 +754,13 @@ function createBriefSelect(sqlLimit: number): string {
         WHEN 'withdrawn' THEN 2
         WHEN 'rejected' THEN 1
       END AS urgency_rank
-    FROM regulation_events e
+    FROM laws l
     ORDER BY
-      e.chili_score DESC,
+      l.chili_score DESC,
+      l.update_count DESC,
       urgency_rank DESC,
-      e.updated_at DESC,
-      e.id ASC
+      l.latest_update_at DESC,
+      l.id ASC
     LIMIT ${sqlLimit};
   `;
 }
@@ -704,6 +896,15 @@ export function createApp(db: DatabaseConstructor.Database) {
     );
   }
 
+  const startupLawSync = syncLawsFromEvents(db);
+  if (startupLawSync.scanned > 0) {
+    console.log(
+      `Startup law sync scanned ${startupLawSync.scanned} events -> `
+      + `${startupLawSync.insertedLaws} laws, ${startupLawSync.insertedUpdates} updates, `
+      + `${startupLawSync.mergedDuplicates} merges`
+    );
+  }
+
   const app = express();
   app.use(express.json());
   app.use(express.static(path.join(process.cwd(), "web")));
@@ -721,8 +922,9 @@ export function createApp(db: DatabaseConstructor.Database) {
   app.get("/api/crawl/status", (req: Request, res: Response) => {
     const lastRun = getLatestCrawlRun(db);
     const totalEvents = (db.prepare("SELECT COUNT(*) AS total FROM regulation_events").get() as { total: number }).total;
+    const totalLaws = (db.prepare("SELECT COUNT(*) AS total FROM laws").get() as { total: number }).total;
     const highRiskCount = (
-      db.prepare("SELECT COUNT(*) AS total FROM regulation_events WHERE chili_score >= 4").get() as { total: number }
+      db.prepare("SELECT COUNT(*) AS total FROM laws WHERE chili_score >= 4").get() as { total: number }
     ).total;
 
     res.json({
@@ -730,6 +932,7 @@ export function createApp(db: DatabaseConstructor.Database) {
       isRunning: crawlState.running,
       activeRunId: crawlState.runId,
       totalEvents,
+      totalLaws,
       highRiskCount,
       lastCrawledAt: getLastCrawledAt(db),
       lastRun,
@@ -739,11 +942,11 @@ export function createApp(db: DatabaseConstructor.Database) {
 
   app.get("/api/brief", (req: Request, res: Response) => {
     const limit = parsePaging(req.query.limit, defaultBriefLimit, 20);
-    const rows = db.prepare(createBriefSelect(limit)).all() as DbEventRow[];
+    const rows = db.prepare(createBriefSelect(limit)).all() as DbLawRow[];
     const items = rows.map((row) => {
-      const event = sanitizeEvent(row);
+      const law = sanitizeLaw(row);
       return {
-        ...event,
+        ...law,
         urgencyScore: stageUrgency[row.stage] ?? 0,
         chiliScore: row.chili_score,
       };
@@ -755,6 +958,295 @@ export function createApp(db: DatabaseConstructor.Database) {
       items,
       total: rows.length,
       limit,
+    });
+  });
+
+  app.get("/api/laws", (req: Request, res: Response) => {
+    const minRisk = parseSingleInt(req.query.minRisk, 1, 5);
+    const maxRisk = parseSingleInt(req.query.maxRisk, 1, 5);
+    if (req.query.minRisk !== undefined && minRisk === undefined) {
+      return res.status(400).json({ error: "minRisk must be an integer between 1 and 5" });
+    }
+    if (req.query.maxRisk !== undefined && maxRisk === undefined) {
+      return res.status(400).json({ error: "maxRisk must be an integer between 1 and 5" });
+    }
+    if (minRisk !== undefined && maxRisk !== undefined && minRisk > maxRisk) {
+      return res.status(400).json({ error: "minRisk cannot be greater than maxRisk" });
+    }
+
+    const stagesRaw = typeof req.query.stage === "string" ? req.query.stage : undefined;
+    const stages = parseStageList(stagesRaw);
+    if (stagesRaw && stages.length === 0) {
+      return res.status(400).json({ error: "stage must use valid lifecycle values" });
+    }
+
+    const ageBracketsRaw = typeof req.query.ageBracket === "string" ? req.query.ageBracket : undefined;
+    const ageBrackets = parseAgeBracketList(ageBracketsRaw);
+    if (ageBracketsRaw && ageBrackets.length === 0) {
+      return res.status(400).json({ error: "ageBracket must use valid values" });
+    }
+
+    const filters: EventFilters = {
+      search: typeof req.query.search === "string" ? req.query.search.trim() : undefined,
+      jurisdictions: parseList(typeof req.query.jurisdiction === "string" ? req.query.jurisdiction : undefined),
+      stages,
+      ageBrackets,
+      minRisk,
+      maxRisk,
+      dateFrom: typeof req.query.dateFrom === "string" ? req.query.dateFrom : undefined,
+      dateTo: typeof req.query.dateTo === "string" ? req.query.dateTo : undefined,
+      under16Only: String(req.query.under16Only ?? "").toLowerCase() === "true",
+    };
+
+    const page = parsePaging(req.query.page, 1);
+    const limit = parsePaging(req.query.limit, 10, 100);
+    const offset = (page - 1) * limit;
+
+    const { where, params } = buildLawWhereClause(filters);
+    const total = (
+      db.prepare(`SELECT COUNT(*) AS total FROM laws l ${where}`).get(...params) as { total: number }
+    ).total;
+
+    const orderBy = resolveLawSort(
+      typeof req.query.sortBy === "string" ? req.query.sortBy : undefined,
+      typeof req.query.sortDirection === "string" ? req.query.sortDirection : undefined,
+    );
+
+    const rows = db
+      .prepare(
+        `
+          SELECT
+            l.id,
+            l.law_key,
+            l.canonical_title,
+            l.display_title,
+            l.jurisdiction_country,
+            l.jurisdiction_state,
+            l.stage,
+            l.age_bracket,
+            l.is_under16_applicable,
+            l.impact_score,
+            l.likelihood_score,
+            l.confidence_score,
+            l.chili_score,
+            l.summary,
+            l.business_impact,
+            l.required_solutions,
+            l.competitor_responses,
+            l.effective_date,
+            l.published_date,
+            l.source_url,
+            l.reliability_tier,
+            l.status,
+            l.last_crawled_at,
+            l.first_seen_at,
+            l.latest_update_at,
+            l.update_count,
+            l.created_at,
+            l.updated_at
+          FROM laws l
+          ${where}
+          ORDER BY ${orderBy}, l.id ASC
+          LIMIT ? OFFSET ?
+        `,
+      )
+      .all(...params, limit, offset) as DbLawRow[];
+
+    setPaginationHeaders(res, page, limit, total);
+
+    res.json({
+      items: rows.map((row) => sanitizeLaw(row)),
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      lastCrawledAt: getLastCrawledAt(db),
+    });
+  });
+
+  app.get("/api/laws/:id", (req: Request, res: Response) => {
+    const lawId = parseSingleInt(req.params.id, 1);
+    if (!lawId) {
+      return res.status(400).json({ error: "invalid id" });
+    }
+
+    const row = db
+      .prepare(
+        `
+          SELECT
+            l.id,
+            l.law_key,
+            l.canonical_title,
+            l.display_title,
+            l.jurisdiction_country,
+            l.jurisdiction_state,
+            l.stage,
+            l.age_bracket,
+            l.is_under16_applicable,
+            l.impact_score,
+            l.likelihood_score,
+            l.confidence_score,
+            l.chili_score,
+            l.summary,
+            l.business_impact,
+            l.required_solutions,
+            l.competitor_responses,
+            l.effective_date,
+            l.published_date,
+            l.source_url,
+            l.reliability_tier,
+            l.status,
+            l.last_crawled_at,
+            l.first_seen_at,
+            l.latest_update_at,
+            l.update_count,
+            l.created_at,
+            l.updated_at
+          FROM laws l
+          WHERE l.id = ?
+        `,
+      )
+      .get(lawId) as DbLawRow | undefined;
+
+    if (!row) {
+      return res.status(404).json({ error: "law not found" });
+    }
+
+    const updates = db
+      .prepare(
+        `
+          SELECT
+            id,
+            law_id,
+            update_key,
+            title,
+            canonical_title,
+            stage,
+            age_bracket,
+            is_under16_applicable,
+            impact_score,
+            likelihood_score,
+            confidence_score,
+            chili_score,
+            summary,
+            business_impact,
+            required_solutions,
+            competitor_responses,
+            effective_date,
+            published_date,
+            source_url,
+            raw_content,
+            reliability_tier,
+            status,
+            captured_at,
+            created_at
+          FROM law_updates
+          WHERE law_id = ?
+          ORDER BY COALESCE(published_date, captured_at) DESC, id DESC
+        `,
+      )
+      .all(lawId) as Array<{
+      id: number;
+      law_id: number;
+      update_key: string;
+      title: string;
+      canonical_title: string;
+      stage: Stage;
+      age_bracket: string;
+      is_under16_applicable: number;
+      impact_score: number;
+      likelihood_score: number;
+      confidence_score: number;
+      chili_score: number;
+      summary: string | null;
+      business_impact: string | null;
+      required_solutions: string | null;
+      competitor_responses: string | null;
+      effective_date: string | null;
+      published_date: string | null;
+      source_url: string | null;
+      raw_content: string | null;
+      reliability_tier: number;
+      status: string;
+      captured_at: string;
+      created_at: string;
+    }>;
+
+    const relatedRows = db
+      .prepare(
+        `
+          SELECT
+            l.id,
+            l.law_key,
+            l.canonical_title,
+            l.display_title,
+            l.jurisdiction_country,
+            l.jurisdiction_state,
+            l.stage,
+            l.age_bracket,
+            l.is_under16_applicable,
+            l.impact_score,
+            l.likelihood_score,
+            l.confidence_score,
+            l.chili_score,
+            l.summary,
+            l.business_impact,
+            l.required_solutions,
+            l.competitor_responses,
+            l.effective_date,
+            l.published_date,
+            l.source_url,
+            l.reliability_tier,
+            l.status,
+            l.last_crawled_at,
+            l.first_seen_at,
+            l.latest_update_at,
+            l.update_count,
+            l.created_at,
+            l.updated_at
+          FROM laws l
+          WHERE l.id <> ?
+            AND (
+              l.jurisdiction_country = ?
+              OR l.stage = ?
+              OR lower(l.canonical_title) LIKE ?
+            )
+          ORDER BY l.chili_score DESC, l.latest_update_at DESC
+          LIMIT 5
+        `,
+      )
+      .all(lawId, row.jurisdiction_country, row.stage, `%${row.canonical_title.slice(0, 18).toLowerCase()}%`) as DbLawRow[];
+
+    res.json({
+      ...sanitizeLaw(row),
+      updateTimeline: updates.map((update) => ({
+        id: update.id,
+        lawId: update.law_id,
+        updateKey: update.update_key,
+        title: cleanTitle(update.title),
+        canonicalTitle: update.canonical_title,
+        stage: update.stage,
+        ageBracket: update.age_bracket,
+        isUnder16Applicable: Boolean(update.is_under16_applicable),
+        scores: {
+          impact: update.impact_score,
+          likelihood: update.likelihood_score,
+          confidence: update.confidence_score,
+          chili: update.chili_score,
+        },
+        summary: update.summary ? cleanText(update.summary) : "",
+        businessImpact: update.business_impact ? cleanText(update.business_impact) : "",
+        requiredSolutions: jsonArray(update.required_solutions),
+        competitorResponses: jsonArray(update.competitor_responses),
+        effectiveDate: update.effective_date,
+        publishedDate: update.published_date,
+        sourceUrl: update.source_url,
+        reliabilityTier: update.reliability_tier,
+        status: update.status,
+        capturedAt: update.captured_at,
+        createdAt: update.created_at,
+      })),
+      relatedLaws: relatedRows.map((related) => sanitizeLaw(related)),
     });
   });
 
@@ -1148,6 +1640,7 @@ export function createApp(db: DatabaseConstructor.Database) {
       const result = await runPipeline(db, sourceIds);
       const cleanup = runDataCleanup(db);
       const backfill = backfillEventRiskAndJurisdiction(db);
+      const lawSync = syncLawsFromEvents(db);
 
       const config = db.prepare("SELECT * FROM alert_configs LIMIT 1").get() as AlertConfigRow;
       const minChili = config?.min_chili ?? 4;
@@ -1171,6 +1664,7 @@ export function createApp(db: DatabaseConstructor.Database) {
         itemsSaved: result.itemsSaved,
         highRiskNotifications: notificationCount,
         backfill,
+        lawSync,
         completedAt: new Date().toISOString(),
       });
 
@@ -1181,6 +1675,7 @@ export function createApp(db: DatabaseConstructor.Database) {
         ...result,
         cleanup,
         backfill,
+        lawSync,
         highRiskNotifications: notificationCount,
       });
     } catch (error) {
@@ -1199,11 +1694,11 @@ export function createApp(db: DatabaseConstructor.Database) {
 
   app.get("/api/jurisdictions", (req: Request, res: Response) => {
     const countries = db
-      .prepare("SELECT jurisdiction_country AS country, COUNT(*) AS count FROM regulation_events GROUP BY jurisdiction_country ORDER BY count DESC, country ASC")
+      .prepare("SELECT jurisdiction_country AS country, COUNT(*) AS count FROM laws GROUP BY jurisdiction_country ORDER BY count DESC, country ASC")
       .all() as Array<{ country: string; count: number }>;
 
     const states = db
-      .prepare("SELECT jurisdiction_state AS state, COUNT(*) AS count FROM regulation_events WHERE jurisdiction_state IS NOT NULL AND jurisdiction_state <> '' GROUP BY jurisdiction_state ORDER BY count DESC, state ASC")
+      .prepare("SELECT jurisdiction_state AS state, COUNT(*) AS count FROM laws WHERE jurisdiction_state IS NOT NULL AND jurisdiction_state <> '' GROUP BY jurisdiction_state ORDER BY count DESC, state ASC")
       .all() as Array<{ state: string; count: number }>;
 
     res.json({
@@ -1221,8 +1716,8 @@ export function createApp(db: DatabaseConstructor.Database) {
           COUNT(*) AS totalEvents,
           ROUND(AVG(chili_score), 2) AS averageRiskScore,
           SUM(CASE WHEN chili_score >= 4 THEN 1 ELSE 0 END) AS highRiskCount,
-          MAX(updated_at) AS newestEventUpdatedAt
-        FROM regulation_events
+          MAX(latest_update_at) AS newestEventUpdatedAt
+        FROM laws
       `
       )
       .get() as {
@@ -1236,7 +1731,7 @@ export function createApp(db: DatabaseConstructor.Database) {
       .prepare(
         `
         SELECT jurisdiction_country AS country, COUNT(*) AS count
-        FROM regulation_events
+        FROM laws
         GROUP BY jurisdiction_country
         ORDER BY count DESC, country ASC
         LIMIT 1
@@ -1260,11 +1755,11 @@ export function createApp(db: DatabaseConstructor.Database) {
       .prepare(
         `
         SELECT
-          substr(COALESCE(published_date, updated_at), 1, 7) AS month,
+          substr(COALESCE(published_date, latest_update_at), 1, 7) AS month,
           COUNT(*) AS count,
           ROUND(AVG(chili_score), 2) AS avgRisk,
           SUM(CASE WHEN chili_score >= 4 THEN 1 ELSE 0 END) AS highRiskCount
-        FROM regulation_events
+        FROM laws
         GROUP BY month
         ORDER BY month ASC
       `
@@ -1284,7 +1779,7 @@ export function createApp(db: DatabaseConstructor.Database) {
           ROUND(AVG(chili_score), 2) AS avgRisk,
           MAX(chili_score) AS maxRisk,
           SUM(CASE WHEN chili_score >= 4 THEN 1 ELSE 0 END) AS highRiskCount
-        FROM regulation_events
+        FROM laws
         GROUP BY jurisdiction_country
         ORDER BY avgRisk DESC, count DESC, country ASC
       `
@@ -1299,7 +1794,7 @@ export function createApp(db: DatabaseConstructor.Database) {
       .prepare(
         `
         SELECT stage, COUNT(*) AS count, ROUND(AVG(chili_score), 2) AS avgRisk
-        FROM regulation_events
+        FROM laws
         GROUP BY stage
         ORDER BY count DESC
       `
@@ -1311,7 +1806,7 @@ export function createApp(db: DatabaseConstructor.Database) {
 
   app.get("/api/analytics/pipeline", (req: Request, res: Response) => {
     const stageCounts = db
-      .prepare("SELECT stage, COUNT(*) AS count FROM regulation_events GROUP BY stage")
+      .prepare("SELECT stage, COUNT(*) AS count FROM laws GROUP BY stage")
       .all() as Array<{ stage: Stage; count: number }>;
 
     const countMap = new Map(stageCounts.map((entry) => [entry.stage, entry.count]));
@@ -1329,21 +1824,21 @@ export function createApp(db: DatabaseConstructor.Database) {
     const rows = db
       .prepare(
         `
-        SELECT id, title, jurisdiction_country, competitor_responses, updated_at
-        FROM regulation_events
+        SELECT id, display_title, jurisdiction_country, competitor_responses, latest_update_at
+        FROM laws
         WHERE competitor_responses IS NOT NULL AND competitor_responses <> '[]'
-        ORDER BY updated_at DESC
+        ORDER BY latest_update_at DESC
       `
       )
       .all() as Array<{
-      id: string;
-      title: string;
+      id: number;
+      display_title: string;
       jurisdiction_country: string;
       competitor_responses: string | null;
-      updated_at: string;
+      latest_update_at: string;
     }>;
 
-    const comparison: Record<string, Array<{ eventId: string; eventTitle: string; jurisdiction: string; response: string; updatedAt: string }>> = {};
+    const comparison: Record<string, Array<{ lawId: number; lawTitle: string; jurisdiction: string; response: string; updatedAt: string }>> = {};
 
     for (const row of rows) {
       const responses = jsonArray(row.competitor_responses);
@@ -1357,11 +1852,11 @@ export function createApp(db: DatabaseConstructor.Database) {
         }
 
         comparison[competitor].push({
-          eventId: row.id,
-          eventTitle: cleanTitle(row.title),
+          lawId: row.id,
+          lawTitle: cleanTitle(row.display_title),
           jurisdiction: row.jurisdiction_country,
           response: cleanText(detail),
-          updatedAt: row.updated_at,
+          updatedAt: row.latest_update_at,
         });
       }
     }

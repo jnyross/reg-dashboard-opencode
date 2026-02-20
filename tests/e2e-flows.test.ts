@@ -2,6 +2,7 @@ import request from "supertest";
 import { createApp } from "../src/app";
 import { initializeSchema, openDatabase } from "../src/db";
 import { seedSampleData } from "../src/seed";
+import { syncLawsFromEvents } from "../src/laws";
 
 function buildTestApp() {
   const db = openDatabase(":memory:");
@@ -53,16 +54,18 @@ describe("E2E key flows", () => {
       "2026-02-20T10:00:00.000Z"
     );
 
+    syncLawsFromEvents(db);
+
     const brief = await request(app).get("/api/brief?limit=20");
     expect(brief.status).toBe(200);
     expect(brief.body.lastCrawledAt).toBeDefined();
 
-    const event = brief.body.items.find((item: { id: string }) => item.id === "dirty-test-id");
-    expect(event).toBeDefined();
-    expect(event.title).toContain("Kids' Privacy");
-    expect(event.title).not.toContain("&#039;");
-    expect(event.summary).not.toMatch(/<script|function\(/i);
-    expect(event.isUnder16Applicable).toBe(true);
+    const law = brief.body.items.find((item: { title: string }) => item.title.includes("Kids' Privacy"));
+    expect(law).toBeDefined();
+    expect(law.title).toContain("Kids' Privacy");
+    expect(law.title).not.toContain("&#039;");
+    expect(law.summary).not.toMatch(/<script|function\(/i);
+    expect(law.isUnder16Applicable).toBe(true);
 
     db.close();
   });
