@@ -162,6 +162,13 @@ Return ONLY valid JSON (no markdown, no code fences) in this exact format:
   "chiliScore": 1-5
 }`;
 
+const ANALYSIS_TIMEOUT_MS = Number(process.env.ANALYSIS_TIMEOUT_MS || 120_000);
+const ANALYSIS_RETRIES = Number(process.env.ANALYSIS_RETRIES || 3);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function analyzeItem(item: CrawledItem): Promise<AnalyzedItem> {
   const apiKey = process.env.MINIMAX_API_KEY;
   
@@ -170,53 +177,91 @@ export async function analyzeItem(item: CrawledItem): Promise<AnalyzedItem> {
   }
 
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60_000);
-    
-    const response = await fetch("https://api.minimax.io/anthropic/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "MiniMax-M2.5",
-        max_tokens: 2048,
-        messages: [
-          {
-            role: "user",
-            content: `${ANALYSIS_PROMPT}\n\n---\n\nTitle: ${item.title}\n\nContent: ${item.content.substring(0, 6000)}`,
+    // Include source context (name, URL, description) for better relevance determination
+    const inputText = [
+      `Source: ${item.sourceName || "Unknown"}`,
+      `Source Description: ${item.sourceDescription || ""}`,
+      `URL: ${item.url}`,
+      `Title: ${item.title}`,
+      "",
+      item.content.substring(0, 8000),
+    ].join("\n");
+
+    let parsed: any;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= ANALYSIS_RETRIES; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), ANALYSIS_TIMEOUT_MS);
+
+      try {
+        const response = await fetch("https://api.minimax.io/anthropic/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
           },
-        ],
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
+          body: JSON.stringify({
+            model: "MiniMax-M2.5",
+            max_tokens: 2048,
+            messages: [
+              {
+                role: "user",
+                content: `${ANALYSIS_PROMPT}\n\n--- CRAWLED TEXT ---\n${inputText}`,
+              },
+            ],
+          }),
+          signal: controller.signal,
+        });
 
-    if (!response.ok) {
-      const errBody = await response.text().catch(() => "");
-      throw new Error(`API error: ${response.status} ${errBody.slice(0, 200)}`);
+        if (!response.ok) {
+          const errBody = await response.text().catch(() => "");
+          throw new Error(`API error: ${response.status} ${errBody.slice(0, 200)}`);
+        }
+
+        const data = await response.json() as {
+          content?: Array<{ type?: string; text?: string }>;
+        };
+
+        const rawContent = data.content?.find((c) => c.type === "text")?.text || data.content?.[0]?.text || "";
+        if (!rawContent) {
+          throw new Error("Empty response from API");
+        }
+
+        // Strip markdown fences if present
+        let cleanContent = rawContent.trim();
+        if (cleanContent.startsWith("```")) {
+          cleanContent = cleanContent.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+        }
+
+        // Extract JSON object
+        const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) throw new Error("No JSON found in response");
+
+        parsed = JSON.parse(jsonMatch[0]);
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        const isAuthError = /API error:\s*401/.test(message) || /authentication_error/i.test(message);
+
+        if (isAuthError) {
+          break;
+        }
+
+        if (attempt < ANALYSIS_RETRIES) {
+          await sleep(1500 * attempt);
+        }
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
-    const data = await response.json() as {
-      content?: Array<{ type?: string; text?: string }>;
-    };
-    
-    const rawContent = data.content?.find(c => c.type === "text")?.text || data.content?.[0]?.text || "";
-    if (!rawContent) {
-      throw new Error("Empty response from API");
+    if (!parsed) {
+      throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
-    
-    // Strip markdown fences if present
-    let cleanContent = rawContent.trim();
-    if (cleanContent.startsWith("```")) {
-      cleanContent = cleanContent.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-    }
-    // Extract JSON object
-    const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON found in response");
-    const parsed = JSON.parse(jsonMatch[0]);
 
     if (!parsed.isRelevant) {
       return {

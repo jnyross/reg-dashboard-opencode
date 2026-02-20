@@ -1,7 +1,7 @@
 import DatabaseConstructor from "better-sqlite3";
-import { sources, getSourceById } from "./sources";
-import { crawlSource, crawlAllSources, CrawlResult } from "./crawler";
-import { analyzeItem, AnalyzedItem } from "./analyzer";
+import { sources, RegulatorySource } from "./sources";
+import { crawlSource, CrawledItem } from "./crawler";
+import { analyzeItem } from "./analyzer";
 import { upsertSource, upsertAnalyzedItem } from "./db";
 
 export interface PipelineResult {
@@ -12,6 +12,12 @@ export interface PipelineResult {
   errors: string[];
   startedAt: string;
   completedAt: string;
+}
+
+interface CrawledBundle {
+  source: RegulatorySource;
+  sourceDbId: number;
+  items: CrawledItem[];
 }
 
 export async function runPipeline(
@@ -32,12 +38,33 @@ export async function runPipeline(
     ? sources.filter((s) => sourceIds.includes(s.id))
     : sources;
 
-  console.log(`Starting pipeline for ${targetSources.length} sources...`);
+  const crawlConcurrency = Math.max(1, Number(process.env.CRAWL_CONCURRENCY || 10));
+  const analysisConcurrency = Math.max(1, Math.min(20, Number(process.env.ANALYSIS_CONCURRENCY || 12)));
 
-  for (const source of targetSources) {
-    try {
-      console.log(`Crawling source: ${source.name}...`);
-      
+  console.log(`Starting pipeline for ${targetSources.length} sources...`);
+  console.log(`Crawl concurrency: ${crawlConcurrency}, analysis concurrency: ${analysisConcurrency}`);
+
+  const crawledBundles: CrawledBundle[] = [];
+
+  // Phase 1: crawl all sources in batches
+  for (let i = 0; i < targetSources.length; i += crawlConcurrency) {
+    const batch = targetSources.slice(i, i + crawlConcurrency);
+    const batchResults = await Promise.allSettled(
+      batch.map(async (source, batchIdx) => {
+        const sourceIndex = i + batchIdx + 1;
+        console.log(`[${sourceIndex}/${targetSources.length}] Crawling: ${source.name}...`);
+        const crawlResult = await crawlSource(source);
+        return { source, crawlResult };
+      })
+    );
+
+    for (const batchResult of batchResults) {
+      if (batchResult.status === "rejected") {
+        result.errors.push(`Crawl error: ${String(batchResult.reason).slice(0, 200)}`);
+        continue;
+      }
+
+      const { source, crawlResult } = batchResult.value;
       const sourceDbId = upsertSource(db, {
         sourceId: source.id,
         name: source.name,
@@ -49,60 +76,68 @@ export async function runPipeline(
         description: source.description,
       });
 
-      const crawlResult: CrawlResult = await crawlSource(source);
-      result.sourcesProcessed++;
+      result.sourcesProcessed += 1;
       result.itemsCrawled += crawlResult.items.length;
 
       if (crawlResult.errors.length > 0) {
         result.errors.push(...crawlResult.errors.map((e) => `${source.name}: ${e}`));
       }
 
-      console.log(`  Found ${crawlResult.items.length} items to analyze`);
-      // Process items in concurrent batches of 5
-      const BATCH_SIZE = 5;
-      for (let batchStart = 0; batchStart < crawlResult.items.length; batchStart += BATCH_SIZE) {
-        const batch = crawlResult.items.slice(batchStart, batchStart + BATCH_SIZE);
-        const analyses = await Promise.allSettled(
-          batch.map(async (item, idx) => {
-            const itemNum = batchStart + idx + 1;
-            console.log(`  [${itemNum}/${crawlResult.items.length}] Analyzing: ${item.title.slice(0, 70)}...`);
-            return { item, analyzed: await analyzeItem(item) };
-          })
-        );
+      if (crawlResult.items.length > 0) {
+        crawledBundles.push({ source, sourceDbId, items: crawlResult.items });
+        console.log(`  ✓ ${source.name}: ${crawlResult.items.length} items`);
+      } else {
+        console.log(`  ✗ ${source.name}: 0 items`);
+      }
+    }
+  }
 
-        for (const analysis of analyses) {
-          if (analysis.status === "rejected") {
-            const msg = String(analysis.reason).slice(0, 100);
-            result.errors.push(`Analysis error (${source.name}): ${msg}`);
-            console.log(`    → Error: ${msg}`);
-            continue;
-          }
-          const { item, analyzed } = analysis.value;
-          try {
-            analyzed.sourceId = sourceDbId.toString();
-            result.itemsAnalyzed++;
+  const analysisQueue = crawledBundles.flatMap((bundle) =>
+    bundle.items.map((item) => ({ item, source: bundle.source, sourceDbId: bundle.sourceDbId }))
+  );
 
-            if (analyzed.isRelevant) {
-              const saveResult = upsertAnalyzedItem(db, analyzed, source.reliabilityTier);
-              result.itemsSaved++;
-              console.log(`    → Saved: ${item.title.slice(0, 60)}${saveResult.statusChanged ? ' [STATUS CHANGED]' : ''}`);
-            } else {
-              console.log(`    → Skipped (not relevant)`);
-            }
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            result.errors.push(`Analysis error (${source.name}): ${msg}`);
-            console.log(`    → Error: ${msg.slice(0, 100)}`);
+  const totalItems = analysisQueue.length;
+
+  console.log(`\nCrawl complete: ${result.itemsCrawled} items from ${result.sourcesProcessed} sources`);
+  console.log(`Now analyzing ${totalItems} items with MiniMax M2.5...\n`);
+
+  // Phase 2: analyze all crawled items with global concurrency
+  let queueIndex = 0;
+
+  const workers = Array.from(
+    { length: Math.min(analysisConcurrency, Math.max(1, totalItems)) },
+    async () => {
+      while (true) {
+        const currentIndex = queueIndex++;
+        if (currentIndex >= totalItems) break;
+
+        const { item, source, sourceDbId } = analysisQueue[currentIndex];
+
+        try {
+          console.log(`  [${currentIndex + 1}/${totalItems}] Analyzing: ${item.title.slice(0, 70)}...`);
+          const analyzed = await analyzeItem(item);
+          analyzed.sourceId = sourceDbId.toString();
+          result.itemsAnalyzed += 1;
+
+          if (analyzed.isRelevant) {
+            const saveResult = upsertAnalyzedItem(db, analyzed, source.reliabilityTier);
+            result.itemsSaved += 1;
+            console.log(
+              `    → Saved: ${item.title.slice(0, 60)}${saveResult.statusChanged ? " [STATUS CHANGED]" : ""}`
+            );
+          } else {
+            console.log("    → Skipped (not relevant)");
           }
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          result.errors.push(`Analysis error (${source.name}): ${msg}`);
+          console.log(`    → Error: ${msg.slice(0, 120)}`);
         }
       }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      result.errors.push(`Source error (${source.name}): ${msg}`);
     }
+  );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
+  await Promise.all(workers);
 
   result.completedAt = new Date().toISOString();
   console.log(`Pipeline complete: ${result.itemsSaved} items saved`);
