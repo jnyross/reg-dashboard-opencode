@@ -3,74 +3,189 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Global Under-16 Regulation Dashboard</title>
+  <title>OpenCode Regulatory Intelligence Dashboard</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div id="error-banner" class="error-banner hidden">
-    <span id="error-message"></span>
-    <button onclick="hideError()">Dismiss</button>
-  </div>
+  <div id="toast" class="toast hidden"></div>
 
-  <header>
-    <div class="header-content">
-      <h1>Global Teen Regulation Dashboard</h1>
-      <p class="last-updated">Last updated: <span id="last-updated">Loading...</span> | Last crawled: <span id="last-crawled">Never</span></p>
-      <button id="crawl-btn" class="btn-primary" onclick="triggerCrawl()">🔄 Run Crawl</button>
+  <header class="topbar">
+    <div>
+      <h1>OpenCode Regulatory Intelligence</h1>
+      <p class="subtle">Last crawled: <span id="last-crawled">Loading...</span></p>
+    </div>
+    <div class="topbar-actions">
+      <button id="theme-toggle" class="btn ghost" onclick="toggleTheme()">🌙 Dark Mode</button>
+      <button id="crawl-btn" class="btn primary" onclick="runCrawl()">🔄 Run Crawl</button>
     </div>
   </header>
 
+  <section id="notification-strip" class="notification-strip hidden"></section>
+
+  <nav class="tabs">
+    <button class="tab active" data-page="dashboard" onclick="showPage('dashboard')">Dashboard</button>
+    <button class="tab" data-page="events" onclick="showPage('events')">Events</button>
+    <button class="tab" data-page="competitors" onclick="showPage('competitors')">Competitors</button>
+    <button class="tab" data-page="reports" onclick="showPage('reports')">Reports</button>
+  </nav>
+
   <main>
-    <section class="brief-section">
-      <h2>Just Read: Priority Briefing</h2>
-      <div id="brief-container" class="brief-grid">
-        <div class="loading">Loading brief...</div>
+    <section id="page-dashboard" class="page active">
+      <div class="stats-grid" id="stats-grid">
+        <div class="stat-card"><div class="label">Total Events</div><div class="value" id="stat-total">-</div></div>
+        <div class="stat-card"><div class="label">Avg Risk</div><div class="value" id="stat-avg-risk">-</div></div>
+        <div class="stat-card"><div class="label">Top Jurisdiction</div><div class="value" id="stat-top-jurisdiction">-</div></div>
+        <div class="stat-card"><div class="label">Newest Event</div><div class="value" id="stat-newest">-</div></div>
       </div>
+
+      <div class="panel-grid two-col">
+        <article class="panel">
+          <h2>Risk Heatmap by Jurisdiction</h2>
+          <div id="heatmap-grid" class="heatmap-grid"></div>
+        </article>
+        <article class="panel">
+          <h2>Stage Pipeline</h2>
+          <div id="pipeline-chart" class="pipeline-chart"></div>
+        </article>
+      </div>
+
+      <article class="panel">
+        <h2>Trend Chart (Events by Month)</h2>
+        <div id="trend-chart" class="trend-chart"></div>
+      </article>
+
+      <article class="panel">
+        <h2>Priority Brief</h2>
+        <div id="brief-grid" class="brief-grid"></div>
+      </article>
     </section>
 
-    <section class="events-section">
-      <div class="section-header">
-        <h2>All Regulation Events</h2>
-        <div class="filters">
-          <div class="filter-group">
-            <label for="jurisdiction-filter">Jurisdiction:</label>
-            <select id="jurisdiction-filter">
-              <option value="">All Jurisdictions</option>
-            </select>
+    <section id="page-events" class="page">
+      <article class="panel">
+        <h2>Search & Discovery</h2>
+        <div class="filters-grid">
+          <input id="filter-search" type="search" placeholder="Search title, summary, impact, content..." />
+
+          <select id="filter-jurisdiction" multiple size="4" title="Jurisdiction"></select>
+          <select id="filter-stage" multiple size="4" title="Stage">
+            <option value="proposed">Proposed</option>
+            <option value="introduced">Introduced</option>
+            <option value="committee_review">Committee Review</option>
+            <option value="passed">Passed</option>
+            <option value="enacted">Enacted</option>
+            <option value="effective">Effective</option>
+            <option value="amended">Amended</option>
+            <option value="withdrawn">Withdrawn</option>
+            <option value="rejected">Rejected</option>
+          </select>
+
+          <div class="range-group">
+            <label>Risk Range: <span id="risk-range-label">1-5</span></label>
+            <div>
+              <input id="filter-min-risk" type="range" min="1" max="5" value="1" />
+              <input id="filter-max-risk" type="range" min="1" max="5" value="5" />
+            </div>
           </div>
-          <div class="filter-group">
-            <label for="age-bracket-filter">Age Bracket:</label>
-            <select id="age-bracket-filter">
-              <option value="">All Ages</option>
-              <option value="13-15">13-15 (Early Teens)</option>
-              <option value="16-18">16-18 (Late Teens)</option>
-              <option value="both">Both</option>
-            </select>
+
+          <div class="date-group">
+            <label for="filter-date-from">From</label>
+            <input id="filter-date-from" type="date" />
+            <label for="filter-date-to">To</label>
+            <input id="filter-date-to" type="date" />
           </div>
-          <div class="filter-group">
-            <label for="min-risk-filter">Min Risk:</label>
-            <select id="min-risk-filter">
-              <option value="">Any</option>
-              <option value="1">1+ 🌶️</option>
-              <option value="2">2+ 🌶️</option>
-              <option value="3">3+ 🌶️</option>
-              <option value="4">4+ 🌶️</option>
-              <option value="5">5 🌶️</option>
-            </select>
-          </div>
-          <button onclick="applyFilters()" class="btn-primary">Apply Filters</button>
-          <button onclick="clearFilters()" class="btn-secondary">Clear</button>
+
+          <select id="filter-age">
+            <option value="">All age brackets</option>
+            <option value="13-15">13-15</option>
+            <option value="16-18">16-18</option>
+            <option value="both">Both</option>
+          </select>
+
+          <select id="filter-sort">
+            <option value="updated">Recently Updated</option>
+            <option value="date">Date</option>
+            <option value="risk">Risk Score</option>
+            <option value="jurisdiction">Jurisdiction</option>
+            <option value="stage">Stage</option>
+          </select>
+
+          <label class="checkbox-inline">
+            <input id="filter-under16-only" type="checkbox" />
+            Under-16 only
+          </label>
         </div>
-      </div>
 
-      <div id="events-container">
-        <div class="loading">Loading events...</div>
-      </div>
+        <div class="action-row">
+          <button class="btn primary" onclick="applyFilters()">Apply Filters</button>
+          <button class="btn" onclick="clearFilters()">Clear</button>
+          <button class="btn" onclick="saveCurrentSearch()">Save Search</button>
+          <button class="btn" onclick="exportCsv()">Export CSV</button>
+          <button class="btn" onclick="exportPdf()">Export PDF</button>
+        </div>
 
-      <div class="pagination" id="pagination">
-      </div>
+        <div class="saved-search-row">
+          <select id="saved-searches"></select>
+          <button class="btn" onclick="loadSavedSearch()">Load</button>
+          <button class="btn danger" onclick="deleteSavedSearch()">Delete</button>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div id="events-meta" class="subtle"></div>
+        <div id="events-table-wrap"></div>
+        <div id="events-pagination" class="pagination"></div>
+      </article>
+    </section>
+
+    <section id="page-competitors" class="page">
+      <article class="panel">
+        <h2>Competitor Intelligence</h2>
+        <div id="competitor-table-wrap"></div>
+      </article>
+    </section>
+
+    <section id="page-reports" class="page">
+      <article class="panel">
+        <h2>Reporting</h2>
+        <div class="action-row">
+          <button class="btn" onclick="downloadTrendReport()">Trend Analysis (JSON)</button>
+          <button class="btn" onclick="downloadJurisdictionReport()">Jurisdiction Deep Dive</button>
+          <button class="btn" onclick="downloadCustomReport()">Custom Report</button>
+        </div>
+      </article>
+
+      <article class="panel">
+        <h2>Email Digest & Alerts</h2>
+        <div class="filters-grid compact">
+          <input id="digest-email" type="email" placeholder="Email recipient" />
+          <select id="digest-frequency">
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          <select id="digest-min-chili">
+            <option value="1">1+ 🌶️</option>
+            <option value="2">2+ 🌶️</option>
+            <option value="3">3+ 🌶️</option>
+            <option value="4" selected>4+ 🌶️</option>
+            <option value="5">5 🌶️</option>
+          </select>
+          <input id="digest-webhook" type="url" placeholder="Webhook URL (Slack/Teams)" />
+        </div>
+        <div class="action-row">
+          <button class="btn primary" onclick="saveAlertConfig()">Save Alert Config</button>
+          <button class="btn" onclick="previewDigest()">Preview Digest</button>
+        </div>
+        <pre id="digest-preview" class="digest-preview"></pre>
+      </article>
     </section>
   </main>
+
+  <dialog id="event-dialog" class="event-dialog">
+    <form method="dialog">
+      <button class="close-btn">✕</button>
+    </form>
+    <div id="event-dialog-body"></div>
+  </dialog>
 
   <script src="app.js"></script>
 </body>

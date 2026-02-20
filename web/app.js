@@ -1,351 +1,784 @@
-const API_BASE = 'http://localhost:3001/api';
+const API_BASE = `${window.location.origin}/api`;
 
 let currentPage = 1;
-let currentJurisdiction = '';
-let currentAgeBracket = '';
-let currentMinRisk = '';
-let lastUpdated = null;
-let lastCrawled = null;
+let currentFilters = {
+  search: '',
+  jurisdiction: [],
+  stage: [],
+  minRisk: 1,
+  maxRisk: 5,
+  ageBracket: '',
+  dateFrom: '',
+  dateTo: '',
+  sortBy: 'updated',
+  under16Only: false,
+};
 
-function showError(message) {
-  const banner = document.getElementById('error-banner');
-  const msg = document.getElementById('error-message');
-  msg.textContent = message;
-  banner.classList.remove('hidden');
+function showToast(message, isError = false) {
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.style.background = isError ? 'var(--danger)' : 'var(--primary)';
+  toast.classList.remove('hidden');
+  setTimeout(() => toast.classList.add('hidden'), 3500);
 }
 
-function hideError() {
-  document.getElementById('error-banner').classList.add('hidden');
+async function apiJson(path, options) {
+  const response = await fetch(`${API_BASE}${path}`, options);
+  if (!response.ok) {
+    let message = `${response.status}`;
+    try {
+      const body = await response.json();
+      message = body.error || message;
+    } catch {
+      // ignore
+    }
+    throw new Error(message);
+  }
+  return response.json();
 }
 
-function getChiliHTML(score) {
-  const filled = '🌶️'.repeat(score);
-  const empty = '○'.repeat(5 - score);
-  return `<span class="chili">${filled}${empty}</span>`;
-}
-
-function getReliabilityHTML(tier) {
-  if (!tier) return '';
-  const stars = '★'.repeat(tier) + '☆'.repeat(5 - tier);
-  return `<span class="reliability" title="Source reliability: ${tier}/5">${stars}</span>`;
-}
-
-function getAgeBracketLabel(bracket) {
-  const labels = {
-    '13-15': '13-15',
-    '16-18': '16-18',
-    'both': '13-18',
-    'unknown': 'All'
-  };
-  return labels[bracket] || bracket || '';
-}
-
-function formatDate(isoString) {
-  if (!isoString) return '';
-  const date = new Date(isoString);
-  return date.toLocaleDateString('en-US', { 
-    month: 'short', 
-    day: 'numeric', 
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
+function formatDate(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('en-GB', {
+    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
   });
 }
 
-function formatJurisdiction(item) {
-  if (item.jurisdiction.state) {
-    return `${item.jurisdiction.state}, ${item.jurisdiction.country}`;
-  }
-  return item.jurisdiction.country;
+function chili(score) {
+  const safe = Math.max(1, Math.min(5, Number(score) || 1));
+  return `${'🌶️'.repeat(safe)}${'○'.repeat(5 - safe)}`;
 }
 
-function renderBriefItems(items) {
-  const container = document.getElementById('brief-container');
-  
-  if (!items || items.length === 0) {
-    container.innerHTML = '<div class="empty-state">No priority items at this time.</div>';
+function stageLabel(stage) {
+  return (stage || '').replaceAll('_', ' ');
+}
+
+function getMultiSelectValues(id) {
+  const select = document.getElementById(id);
+  return Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean);
+}
+
+function setMultiSelectValues(id, values) {
+  const select = document.getElementById(id);
+  const valueSet = new Set(values || []);
+  Array.from(select.options).forEach((option) => {
+    option.selected = valueSet.has(option.value);
+  });
+}
+
+function showPage(page) {
+  document.querySelectorAll('.page').forEach((node) => node.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach((node) => node.classList.remove('active'));
+  document.getElementById(`page-${page}`).classList.add('active');
+  document.querySelector(`.tab[data-page="${page}"]`).classList.add('active');
+
+  localStorage.setItem('opencode-active-page', page);
+
+  if (page === 'dashboard') loadDashboard();
+  if (page === 'events') loadEvents(1);
+  if (page === 'competitors') loadCompetitors();
+  if (page === 'reports') loadReportsPane();
+}
+
+async function loadDashboard() {
+  try {
+    const [summary, heatmap, pipeline, trends, brief, alerts, crawlStatus] = await Promise.all([
+      apiJson('/analytics/summary'),
+      apiJson('/analytics/jurisdictions'),
+      apiJson('/analytics/pipeline'),
+      apiJson('/analytics/trends'),
+      apiJson('/brief?limit=6'),
+      apiJson('/alerts?limit=3'),
+      apiJson('/crawl/status'),
+    ]);
+
+    document.getElementById('stat-total').textContent = summary.totalEvents || 0;
+    document.getElementById('stat-avg-risk').textContent = Number(summary.averageRiskScore || 0).toFixed(2);
+    document.getElementById('stat-top-jurisdiction').textContent = summary.topJurisdiction || 'N/A';
+    document.getElementById('stat-newest').textContent = formatDate(summary.newestEventUpdatedAt);
+    document.getElementById('last-crawled').textContent = formatDate(crawlStatus.lastCrawledAt);
+
+    renderHeatmap(heatmap.jurisdictions || []);
+    renderPipeline(pipeline.pipeline || []);
+    renderTrends(trends.trends || []);
+    renderBrief(brief.items || []);
+    renderAlerts(alerts.items || []);
+  } catch (error) {
+    console.error(error);
+    showToast(`Dashboard load failed: ${error.message}`, true);
+  }
+}
+
+function renderHeatmap(items) {
+  const container = document.getElementById('heatmap-grid');
+  if (!items.length) {
+    container.innerHTML = '<div class="subtle">No data</div>';
     return;
   }
 
-  container.innerHTML = items.map(item => `
-    <div class="brief-card">
-      <div class="title">${escapeHTML(item.title)}</div>
-      <div class="meta">
-        <span class="jurisdiction">${escapeHTML(formatJurisdiction(item))}</span>
-        ${item.ageBracket ? `<span class="age-bracket">Age: ${getAgeBracketLabel(item.ageBracket)}</span>` : ''}
-        <span class="stage stage-${item.stage}">${item.stage.replace('_', ' ')}</span>
-        <span class="chili">${getChiliHTML(item.chiliScore || item.scores?.chili || 1)}</span>
-        ${item.reliabilityTier ? getReliabilityHTML(item.reliabilityTier) : ''}
+  const maxRisk = Math.max(...items.map((item) => Number(item.avgRisk || 0)), 1);
+  container.innerHTML = items.slice(0, 24).map((item) => {
+    const ratio = Number(item.avgRisk || 0) / maxRisk;
+    const red = Math.round(220 * ratio);
+    const green = Math.round(180 * (1 - ratio));
+    const bg = `rgba(${red}, ${green}, 70, 0.3)`;
+    return `
+      <div class="heat-cell" style="background:${bg}" onclick="filterJurisdictionFromHeatmap('${encodeURIComponent(item.country)}')">
+        <div><strong>${item.country}</strong> ${item.flag || ''}</div>
+        <div>${item.count} events</div>
+        <div>${Number(item.avgRisk || 0).toFixed(2)} avg risk</div>
       </div>
-      <div class="reason">${escapeHTML(item.summary || 'No summary available')}</div>
-      ${item.source?.url ? `<a href="${escapeHTML(item.source.url)}" target="_blank" rel="noopener" class="source-link">View Source →</a>` : ''}
-      ${item.lastCrawledAt ? `<span class="crawled-at">Crawled: ${formatDate(item.lastCrawledAt)}</span>` : ''}
+    `;
+  }).join('');
+}
+
+function filterJurisdictionFromHeatmap(encodedCountry) {
+  const country = decodeURIComponent(encodedCountry);
+  showPage('events');
+  currentFilters.jurisdiction = [country];
+  syncFiltersToUi();
+  loadEvents(1);
+}
+
+function renderPipeline(items) {
+  const container = document.getElementById('pipeline-chart');
+  if (!items.length) {
+    container.innerHTML = '<div class="subtle">No stage data</div>';
+    return;
+  }
+
+  const max = Math.max(...items.map((item) => item.count || 0), 1);
+  container.innerHTML = items.map((item) => `
+    <div class="pipeline-row">
+      <div>${stageLabel(item.stage)}</div>
+      <div class="bar" style="width:${Math.max(5, (item.count / max) * 100)}%"></div>
+      <div>${item.count} (${item.conversionRate}%)</div>
     </div>
   `).join('');
 }
 
-function renderEventsTable(data) {
-  const container = document.getElementById('events-container');
-  
-  if (!data.items || data.items.length === 0) {
-    container.innerHTML = '<div class="empty-state">No events match your filters.</div>';
+function renderTrends(items) {
+  const container = document.getElementById('trend-chart');
+  if (!items.length) {
+    container.innerHTML = '<div class="subtle">No trend data</div>';
     return;
   }
 
-  const tableHTML = `
-    <table class="events-table">
+  const max = Math.max(...items.map((item) => item.count || 0), 1);
+  container.innerHTML = items.map((item) => `
+    <div class="trend-row">
+      <div>${item.month}</div>
+      <div class="bar" style="width:${Math.max(5, (item.count / max) * 100)}%"></div>
+      <div>${item.count} (${item.highRiskCount} high)</div>
+    </div>
+  `).join('');
+}
+
+function renderBrief(items) {
+  const container = document.getElementById('brief-grid');
+  if (!items.length) {
+    container.innerHTML = '<div class="subtle">No priority items.</div>';
+    return;
+  }
+
+  container.innerHTML = items.map((item) => `
+    <article class="brief-card">
+      <h3>${escapeHtml(item.title)}</h3>
+      <div class="tag-row">
+        <span class="tag">${escapeHtml(item.jurisdiction.flag || '🌍')} ${escapeHtml(item.jurisdiction.country)}</span>
+        <span class="tag">${escapeHtml(stageLabel(item.stage))}</span>
+        <span class="tag">${chili(item.scores?.chili || item.chiliScore)}</span>
+      </div>
+      <p>${escapeHtml(item.summary || '')}</p>
+      <div class="subtle">Last crawled: ${formatDate(item.lastCrawledAt)}</div>
+      <div class="action-row">
+        <button class="btn" onclick="openEvent('${item.id}')">Open</button>
+        ${item.source?.url ? `<a class="btn" href="${escapeHtml(item.source.url)}" target="_blank" rel="noopener">Source ↗</a>` : ''}
+      </div>
+    </article>
+  `).join('');
+}
+
+function renderAlerts(items) {
+  const strip = document.getElementById('notification-strip');
+  if (!items.length) {
+    strip.classList.add('hidden');
+    strip.innerHTML = '';
+    return;
+  }
+
+  strip.classList.remove('hidden');
+  strip.innerHTML = `<strong>Alerts:</strong> ${items.map((item) => escapeHtml(item.message)).join(' · ')}`;
+}
+
+async function loadJurisdictionOptions() {
+  const select = document.getElementById('filter-jurisdiction');
+  try {
+    const data = await apiJson('/jurisdictions');
+    const countries = data.countries || [];
+    select.innerHTML = countries.map((country) =>
+      `<option value="${escapeHtml(country.country)}">${escapeHtml(country.country)} (${country.count})</option>`
+    ).join('');
+  } catch (error) {
+    console.error(error);
+    select.innerHTML = '';
+  }
+}
+
+function readFiltersFromUi() {
+  const minRisk = Number(document.getElementById('filter-min-risk').value);
+  const maxRisk = Number(document.getElementById('filter-max-risk').value);
+  const [safeMin, safeMax] = minRisk <= maxRisk ? [minRisk, maxRisk] : [maxRisk, minRisk];
+
+  currentFilters = {
+    search: document.getElementById('filter-search').value.trim(),
+    jurisdiction: getMultiSelectValues('filter-jurisdiction'),
+    stage: getMultiSelectValues('filter-stage'),
+    minRisk: safeMin,
+    maxRisk: safeMax,
+    ageBracket: document.getElementById('filter-age').value,
+    dateFrom: document.getElementById('filter-date-from').value,
+    dateTo: document.getElementById('filter-date-to').value,
+    sortBy: document.getElementById('filter-sort').value,
+    under16Only: document.getElementById('filter-under16-only').checked,
+  };
+
+  document.getElementById('risk-range-label').textContent = `${safeMin}-${safeMax}`;
+  localStorage.setItem('opencode-filters', JSON.stringify(currentFilters));
+}
+
+function syncFiltersToUi() {
+  document.getElementById('filter-search').value = currentFilters.search || '';
+  setMultiSelectValues('filter-jurisdiction', currentFilters.jurisdiction || []);
+  setMultiSelectValues('filter-stage', currentFilters.stage || []);
+  document.getElementById('filter-min-risk').value = String(currentFilters.minRisk || 1);
+  document.getElementById('filter-max-risk').value = String(currentFilters.maxRisk || 5);
+  document.getElementById('risk-range-label').textContent = `${currentFilters.minRisk || 1}-${currentFilters.maxRisk || 5}`;
+  document.getElementById('filter-age').value = currentFilters.ageBracket || '';
+  document.getElementById('filter-date-from').value = currentFilters.dateFrom || '';
+  document.getElementById('filter-date-to').value = currentFilters.dateTo || '';
+  document.getElementById('filter-sort').value = currentFilters.sortBy || 'updated';
+  document.getElementById('filter-under16-only').checked = Boolean(currentFilters.under16Only);
+}
+
+function applyFilters() {
+  readFiltersFromUi();
+  loadEvents(1);
+}
+
+function clearFilters() {
+  currentFilters = {
+    search: '',
+    jurisdiction: [],
+    stage: [],
+    minRisk: 1,
+    maxRisk: 5,
+    ageBracket: '',
+    dateFrom: '',
+    dateTo: '',
+    sortBy: 'updated',
+    under16Only: false,
+  };
+  syncFiltersToUi();
+  localStorage.setItem('opencode-filters', JSON.stringify(currentFilters));
+  loadEvents(1);
+}
+
+async function loadEvents(page = 1) {
+  currentPage = page;
+  const params = new URLSearchParams();
+  params.set('page', String(page));
+  params.set('limit', '15');
+
+  if (currentFilters.search) params.set('search', currentFilters.search);
+  if (currentFilters.jurisdiction?.length) params.set('jurisdiction', currentFilters.jurisdiction.join(','));
+  if (currentFilters.stage?.length) params.set('stage', currentFilters.stage.join(','));
+  if (currentFilters.ageBracket) params.set('ageBracket', currentFilters.ageBracket);
+  if (currentFilters.minRisk) params.set('minRisk', String(currentFilters.minRisk));
+  if (currentFilters.maxRisk) params.set('maxRisk', String(currentFilters.maxRisk));
+  if (currentFilters.dateFrom) params.set('dateFrom', currentFilters.dateFrom);
+  if (currentFilters.dateTo) params.set('dateTo', currentFilters.dateTo);
+  if (currentFilters.sortBy) params.set('sortBy', currentFilters.sortBy);
+  if (currentFilters.under16Only) params.set('under16Only', 'true');
+
+  try {
+    const data = await apiJson(`/events?${params.toString()}`);
+    renderEventsTable(data.items || []);
+    renderEventsPagination(data.page, data.totalPages);
+    document.getElementById('events-meta').textContent = `Showing ${data.items.length} of ${data.total} events`;
+    document.getElementById('last-crawled').textContent = formatDate(data.lastCrawledAt);
+  } catch (error) {
+    showToast(`Events load failed: ${error.message}`, true);
+    document.getElementById('events-table-wrap').innerHTML = '<div class="subtle">Failed to load events.</div>';
+  }
+}
+
+function renderEventsTable(items) {
+  const wrap = document.getElementById('events-table-wrap');
+  if (!items.length) {
+    wrap.innerHTML = '<div class="subtle">No events match your filters.</div>';
+    return;
+  }
+
+  wrap.innerHTML = `
+    <table>
       <thead>
         <tr>
           <th>Title</th>
           <th>Jurisdiction</th>
-          <th>Age</th>
           <th>Stage</th>
+          <th>Age</th>
           <th>Risk</th>
-          <th>Reliability</th>
+          <th>Updated</th>
+          <th>Source</th>
           <th>Feedback</th>
         </tr>
       </thead>
       <tbody>
-        ${data.items.map(item => `
+        ${items.map((item) => `
           <tr>
-            <td class="title-cell">
-              <a href="#" onclick="showEventDetail('${item.id}'); return false;" title="${escapeHTML(item.summary || '')}">
-                ${escapeHTML(item.title)}
-              </a>
-            </td>
-            <td>${escapeHTML(formatJurisdiction(item))}</td>
-            <td>${getAgeBracketLabel(item.ageBracket)}</td>
-            <td><span class="stage stage-${item.stage}">${item.stage.replace('_', ' ')}</span></td>
-            <td class="chili-cell">${getChiliHTML(item.scores?.chili || 1)}</td>
-            <td>${item.reliabilityTier ? getReliabilityHTML(item.reliabilityTier) : ''}</td>
-            <td class="feedback-cell">
-              <button class="feedback-btn good" onclick="submitFeedback('${item.id}', 'good')" title="Mark as good">👍 Good</button>
-              <button class="feedback-btn bad" onclick="submitFeedback('${item.id}', 'bad')" title="Mark as bad">👎 Bad</button>
+            <td><a href="#" onclick="openEvent('${item.id}'); return false;">${escapeHtml(item.title)}</a></td>
+            <td>${escapeHtml(item.jurisdiction.flag || '🌍')} ${escapeHtml(item.jurisdiction.country)}${item.jurisdiction.state ? `, ${escapeHtml(item.jurisdiction.state)}` : ''}</td>
+            <td><span class="tag">${escapeHtml(stageLabel(item.stage))}</span></td>
+            <td>${escapeHtml(item.ageBracket || 'unknown')}</td>
+            <td>${chili(item.scores?.chili)}</td>
+            <td>${formatDate(item.updatedAt)}</td>
+            <td>${item.source?.url ? `<a href="${escapeHtml(item.source.url)}" target="_blank" rel="noopener">link ↗</a>` : '—'}</td>
+            <td>
+              <button class="btn" onclick="submitFeedback('${item.id}', 'good')">👍</button>
+              <button class="btn" onclick="submitFeedback('${item.id}', 'bad')">👎</button>
             </td>
           </tr>
         `).join('')}
       </tbody>
     </table>
   `;
-
-  container.innerHTML = tableHTML;
 }
 
-function renderPagination(data) {
-  const container = document.getElementById('pagination');
-  
-  if (data.totalPages <= 1) {
+function renderEventsPagination(page, totalPages) {
+  const container = document.getElementById('events-pagination');
+  if (totalPages <= 1) {
     container.innerHTML = '';
     return;
   }
 
-  let html = '';
-  
-  if (data.page > 1) {
-    html += `<button onclick="goToPage(${data.page - 1})">← Prev</button>`;
-  }
-  
-  const maxPages = 5;
-  let startPage = Math.max(1, data.page - Math.floor(maxPages / 2));
-  let endPage = Math.min(data.totalPages, startPage + maxPages - 1);
-  
-  if (endPage - startPage < maxPages - 1) {
-    startPage = Math.max(1, endPage - maxPages + 1);
+  const buttons = [];
+  if (page > 1) buttons.push(`<button onclick="loadEvents(${page - 1})">← Prev</button>`);
+
+  const start = Math.max(1, page - 2);
+  const end = Math.min(totalPages, page + 2);
+
+  for (let i = start; i <= end; i += 1) {
+    buttons.push(`<button class="${i === page ? 'active' : ''}" onclick="loadEvents(${i})">${i}</button>`);
   }
 
-  for (let i = startPage; i <= endPage; i++) {
-    html += `<button class="${i === data.page ? 'active' : ''}" onclick="goToPage(${i})">${i}</button>`;
-  }
-  
-  if (data.page < data.totalPages) {
-    html += `<button onclick="goToPage(${data.page + 1})">Next →</button>`;
-  }
-
-  container.innerHTML = html;
+  if (page < totalPages) buttons.push(`<button onclick="loadEvents(${page + 1})">Next →</button>`);
+  container.innerHTML = buttons.join('');
 }
 
-function populateJurisdictionFilter(items) {
-  const select = document.getElementById('jurisdiction-filter');
-  const jurisdictions = new Set();
-  
-  items.forEach(item => {
-    if (item.jurisdiction?.country) {
-      jurisdictions.add(item.jurisdiction.country);
-    }
-    if (item.jurisdiction?.state) {
-      jurisdictions.add(item.jurisdiction.state);
-    }
-  });
-
-  const sorted = Array.from(jurisdictions).sort();
-  
-  const currentValue = select.value;
-  select.innerHTML = '<option value="">All Jurisdictions</option>';
-  sorted.forEach(j => {
-    select.innerHTML += `<option value="${escapeHTML(j)}">${escapeHTML(j)}</option>`;
-  });
-  
-  if (currentValue) {
-    select.value = currentValue;
-  }
-}
-
-async function fetchBrief() {
+async function loadSavedSearches() {
   try {
-    const response = await fetch(`${API_BASE}/brief?limit=5`);
-    if (!response.ok) {
-      throw new Error(`Brief API error: ${response.status}`);
-    }
-    const data = await response.json();
-    renderBriefItems(data.items);
-    lastUpdated = data.generatedAt;
-    document.getElementById('last-updated').textContent = formatDate(data.generatedAt);
+    const data = await apiJson('/saved-searches');
+    const select = document.getElementById('saved-searches');
+    const options = ['<option value="">Saved searches...</option>'];
+    data.items.forEach((item) => {
+      options.push(`<option value="${item.id}" data-name="${escapeHtml(item.name)}">${escapeHtml(item.name)}</option>`);
+    });
+    select.innerHTML = options.join('');
+    select.dataset.items = JSON.stringify(data.items);
   } catch (error) {
-    console.error('Error fetching brief:', error);
-    showError(`Failed to load brief: ${error.message}`);
-    document.getElementById('brief-container').innerHTML = '<div class="error-state">Failed to load brief.</div>';
+    console.error(error);
   }
 }
 
-async function fetchEvents(page = 1) {
-  try {
-    const params = new URLSearchParams();
-    params.set('page', page.toString());
-    params.set('limit', '10');
-    
-    if (currentJurisdiction) {
-      params.set('jurisdiction', currentJurisdiction);
-    }
-    if (currentAgeBracket) {
-      params.set('ageBracket', currentAgeBracket);
-    }
-    if (currentMinRisk) {
-      params.set('minRisk', currentMinRisk);
-    }
+async function saveCurrentSearch() {
+  readFiltersFromUi();
+  const name = window.prompt('Save search as:');
+  if (!name) return;
 
-    const response = await fetch(`${API_BASE}/events?${params}`);
-    if (!response.ok) {
-      throw new Error(`Events API error: ${response.status}`);
-    }
-    const data = await response.json();
-    
-    renderEventsTable(data);
-    renderPagination(data);
-    
-    if (page === 1 && !currentJurisdiction && !currentMinRisk) {
-      populateJurisdictionFilter(data.items);
-    }
+  try {
+    await apiJson('/saved-searches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, filters: currentFilters }),
+    });
+    showToast('Saved search stored.');
+    loadSavedSearches();
   } catch (error) {
-    console.error('Error fetching events:', error);
-    showError(`Failed to load events: ${error.message}`);
-    document.getElementById('events-container').innerHTML = '<div class="error-state">Failed to load events.</div>';
+    showToast(`Save failed: ${error.message}`, true);
+  }
+}
+
+function loadSavedSearch() {
+  const select = document.getElementById('saved-searches');
+  if (!select.value) return;
+  const items = JSON.parse(select.dataset.items || '[]');
+  const selected = items.find((item) => String(item.id) === String(select.value));
+  if (!selected) return;
+
+  currentFilters = {
+    ...currentFilters,
+    ...selected.filters,
+  };
+  syncFiltersToUi();
+  loadEvents(1);
+}
+
+async function deleteSavedSearch() {
+  const select = document.getElementById('saved-searches');
+  if (!select.value) return;
+
+  try {
+    await apiJson(`/saved-searches/${select.value}`, { method: 'DELETE' });
+    showToast('Saved search deleted.');
+    loadSavedSearches();
+  } catch (error) {
+    showToast(`Delete failed: ${error.message}`, true);
+  }
+}
+
+async function openEvent(eventId) {
+  try {
+    const event = await apiJson(`/events/${eventId}`);
+    const dialog = document.getElementById('event-dialog');
+
+    document.getElementById('event-dialog-body').innerHTML = `
+      <h3>${escapeHtml(event.title)}</h3>
+      <div class="event-detail-grid">
+        <div class="detail-item"><div class="label">Jurisdiction</div>${escapeHtml(event.jurisdiction.country)}${event.jurisdiction.state ? `, ${escapeHtml(event.jurisdiction.state)}` : ''}</div>
+        <div class="detail-item"><div class="label">Stage</div>${escapeHtml(stageLabel(event.stage))}</div>
+        <div class="detail-item"><div class="label">Risk</div>${chili(event.scores?.chili)}</div>
+        <div class="detail-item"><div class="label">Age Bracket</div>${escapeHtml(event.ageBracket || 'unknown')}</div>
+        <div class="detail-item full"><div class="label">Summary</div>${escapeHtml(event.summary || '')}</div>
+        <div class="detail-item full"><div class="label">Business Impact</div>${escapeHtml(event.businessImpact || '')}</div>
+        <div class="detail-item full"><div class="label">Regulatory Timeline</div>${(event.regulatoryTimeline || []).map((t) => `${escapeHtml(stageLabel(t.previousStage || 'start'))} → ${escapeHtml(stageLabel(t.newStage))} (${formatDate(t.changedAt)})`).join('<br>')}</div>
+        <div class="detail-item full"><div class="label">Related Events</div>${(event.relatedEvents || []).map((related) => `<a href="#" onclick="openEvent('${related.id}'); return false;">${escapeHtml(related.title)}</a>`).join('<br>') || 'None'}</div>
+        <div class="detail-item full"><div class="label">Feedback History</div>${(event.feedback || []).map((feedback) => `${feedback.rating === 'good' ? '👍' : '👎'} ${escapeHtml(feedback.note || '')} (${formatDate(feedback.createdAt)})`).join('<br>') || 'None'}</div>
+      </div>
+
+      <h4>Edit Event</h4>
+      <div class="filters-grid compact">
+        <input id="edit-title" value="${escapeHtmlAttr(event.title)}" />
+        <select id="edit-stage">
+          ${['proposed','introduced','committee_review','passed','enacted','effective','amended','withdrawn','rejected']
+            .map((stage) => `<option value="${stage}" ${stage === event.stage ? 'selected' : ''}>${stageLabel(stage)}</option>`)
+            .join('')}
+        </select>
+        <select id="edit-age-bracket">
+          ${['13-15','16-18','both','unknown']
+            .map((age) => `<option value="${age}" ${age === event.ageBracket ? 'selected' : ''}>${age}</option>`)
+            .join('')}
+        </select>
+      </div>
+      <div class="filters-grid compact">
+        <textarea id="edit-summary" rows="4">${escapeHtml(event.summary || '')}</textarea>
+        <textarea id="edit-impact" rows="4">${escapeHtml(event.businessImpact || '')}</textarea>
+      </div>
+      <div class="action-row">
+        <button class="btn primary" onclick="saveEventEdits('${event.id}')">Save Edits</button>
+        <button class="btn" onclick="submitFeedback('${event.id}', 'good')">👍 Good</button>
+        <button class="btn" onclick="submitFeedback('${event.id}', 'bad')">👎 Bad</button>
+      </div>
+    `;
+
+    dialog.showModal();
+  } catch (error) {
+    showToast(`Failed to open event: ${error.message}`, true);
+  }
+}
+
+async function saveEventEdits(eventId) {
+  try {
+    await apiJson(`/events/${eventId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: document.getElementById('edit-title').value,
+        stage: document.getElementById('edit-stage').value,
+        ageBracket: document.getElementById('edit-age-bracket').value,
+        summary: document.getElementById('edit-summary').value,
+        businessImpact: document.getElementById('edit-impact').value,
+      }),
+    });
+    showToast('Event updated.');
+    loadEvents(currentPage);
+    loadDashboard();
+  } catch (error) {
+    showToast(`Update failed: ${error.message}`, true);
   }
 }
 
 async function submitFeedback(eventId, rating) {
+  const note = window.prompt('Optional note for feedback:') || '';
   try {
-    const response = await fetch(`${API_BASE}/events/${eventId}/feedback`, {
+    await apiJson(`/events/${eventId}/feedback`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ rating })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating, note }),
     });
-    
-    if (!response.ok) {
-      throw new Error(`Feedback API error: ${response.status}`);
-    }
-    
-    const result = await response.json();
-    console.log('Feedback submitted:', result);
-    
-    showError('Feedback submitted successfully! (This banner will auto-dismiss)');
-    setTimeout(hideError, 3000);
+    showToast('Feedback submitted.');
   } catch (error) {
-    console.error('Error submitting feedback:', error);
-    showError(`Failed to submit feedback: ${error.message}`);
+    showToast(`Feedback failed: ${error.message}`, true);
   }
 }
 
-function showEventDetail(eventId) {
-  console.log('Show detail for event:', eventId);
-}
+async function runCrawl() {
+  const button = document.getElementById('crawl-btn');
+  button.disabled = true;
+  button.textContent = '⏳ Crawling...';
 
-async function triggerCrawl() {
-  const btn = document.getElementById('crawl-btn');
-  btn.disabled = true;
-  btn.textContent = 'Crawling...';
-  
   try {
-    const response = await fetch(`${API_BASE}/crawl`, {
+    const result = await apiJson('/crawl', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({})
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
     });
-    
-    if (!response.ok) {
-      throw new Error(`Crawl API error: ${response.status}`);
-    }
-    
-    const result = await response.json();
-    console.log('Crawl result:', result);
-    
-    lastCrawled = new Date().toISOString();
-    document.getElementById('last-crawled').textContent = formatDate(lastCrawled);
-    
-    showError(`Crawl complete! Items saved: ${result.itemsSaved}`);
-    setTimeout(hideError, 5000);
-    
-    fetchBrief();
-    fetchEvents();
+    showToast(`Crawl ${result.status}. Saved ${result.itemsSaved} items.`);
+    await Promise.all([loadDashboard(), loadEvents(currentPage)]);
   } catch (error) {
-    console.error('Error triggering crawl:', error);
-    showError(`Failed to run crawl: ${error.message}`);
+    showToast(`Crawl failed: ${error.message}`, true);
   } finally {
-    btn.disabled = false;
-    btn.textContent = '🔄 Run Crawl';
+    button.disabled = false;
+    button.textContent = '🔄 Run Crawl';
   }
 }
 
-function goToPage(page) {
-  currentPage = page;
-  fetchEvents(page);
+function exportCsv() {
+  readFiltersFromUi();
+  const params = new URLSearchParams();
+  if (currentFilters.search) params.set('search', currentFilters.search);
+  if (currentFilters.jurisdiction?.length) params.set('jurisdiction', currentFilters.jurisdiction.join(','));
+  if (currentFilters.stage?.length) params.set('stage', currentFilters.stage.join(','));
+  if (currentFilters.ageBracket) params.set('ageBracket', currentFilters.ageBracket);
+  if (currentFilters.minRisk) params.set('minRisk', String(currentFilters.minRisk));
+  if (currentFilters.maxRisk) params.set('maxRisk', String(currentFilters.maxRisk));
+  if (currentFilters.dateFrom) params.set('dateFrom', currentFilters.dateFrom);
+  if (currentFilters.dateTo) params.set('dateTo', currentFilters.dateTo);
+  if (currentFilters.under16Only) params.set('under16Only', 'true');
+  window.open(`${API_BASE}/export/csv?${params.toString()}`, '_blank');
 }
 
-function applyFilters() {
-  currentPage = 1;
-  currentJurisdiction = document.getElementById('jurisdiction-filter').value;
-  currentAgeBracket = document.getElementById('age-bracket-filter').value;
-  currentMinRisk = document.getElementById('min-risk-filter').value;
-  fetchEvents(currentPage);
+function exportPdf() {
+  window.open(`${API_BASE}/export/pdf`, '_blank');
 }
 
-function clearFilters() {
-  currentPage = 1;
-  currentJurisdiction = '';
-  currentAgeBracket = '';
-  currentMinRisk = '';
-  document.getElementById('jurisdiction-filter').value = '';
-  document.getElementById('age-bracket-filter').value = '';
-  document.getElementById('min-risk-filter').value = '';
-  fetchEvents(currentPage);
+async function loadCompetitors() {
+  try {
+    const data = await apiJson('/competitors');
+    const wrap = document.getElementById('competitor-table-wrap');
+    const names = Object.keys(data.comparison || {});
+    if (!names.length) {
+      wrap.innerHTML = '<div class="subtle">No competitor responses available.</div>';
+      return;
+    }
+
+    wrap.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Competitor</th>
+            <th>Response</th>
+            <th>Event</th>
+            <th>Jurisdiction</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${names.flatMap((name) => data.comparison[name].map((entry, idx) => `
+            <tr>
+              ${idx === 0 ? `<td rowspan="${data.comparison[name].length}"><strong>${escapeHtml(name)}</strong></td>` : ''}
+              <td>${escapeHtml(entry.response)}</td>
+              <td><a href="#" onclick="openEvent('${entry.eventId}'); return false;">${escapeHtml(entry.eventTitle)}</a></td>
+              <td>${escapeHtml(entry.jurisdiction)}</td>
+              <td>${formatDate(entry.updatedAt)}</td>
+            </tr>
+          `)).join('')}
+        </tbody>
+      </table>
+    `;
+  } catch (error) {
+    showToast(`Competitor load failed: ${error.message}`, true);
+  }
 }
 
-function escapeHTML(str) {
-  if (!str) return '';
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+async function loadReportsPane() {
+  try {
+    const config = await apiJson('/alerts/config');
+    document.getElementById('digest-email').value = config.email || '';
+    document.getElementById('digest-frequency').value = config.frequency || 'daily';
+    document.getElementById('digest-min-chili').value = String(config.min_chili || 4);
+    document.getElementById('digest-webhook').value = config.webhook_url || '';
+  } catch (error) {
+    console.error(error);
+  }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  fetchBrief();
-  fetchEvents();
-  
-  setInterval(() => {
-    fetchBrief();
-    fetchEvents(currentPage);
-  }, 60000);
+async function saveAlertConfig() {
+  try {
+    await apiJson('/alerts/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: document.getElementById('digest-email').value || null,
+        frequency: document.getElementById('digest-frequency').value,
+        minChili: Number(document.getElementById('digest-min-chili').value),
+        webhookUrl: document.getElementById('digest-webhook').value || null,
+      }),
+    });
+    showToast('Alert config saved.');
+  } catch (error) {
+    showToast(`Config save failed: ${error.message}`, true);
+  }
+}
+
+async function previewDigest() {
+  try {
+    const frequency = document.getElementById('digest-frequency').value;
+    const data = await apiJson(`/email-digest/preview?frequency=${encodeURIComponent(frequency)}`);
+    document.getElementById('digest-preview').textContent = data.previewText;
+  } catch (error) {
+    showToast(`Digest preview failed: ${error.message}`, true);
+  }
+}
+
+async function downloadTrendReport() {
+  try {
+    const data = await apiJson('/reports/trend-analysis');
+    downloadFile('trend-analysis.json', JSON.stringify(data, null, 2), 'application/json');
+  } catch (error) {
+    showToast(`Trend report failed: ${error.message}`, true);
+  }
+}
+
+async function downloadJurisdictionReport() {
+  const country = window.prompt('Jurisdiction country:');
+  if (!country) return;
+  try {
+    const data = await apiJson(`/reports/jurisdiction/${encodeURIComponent(country)}`);
+    downloadFile(`jurisdiction-${country.toLowerCase().replace(/\s+/g, '-')}.json`, JSON.stringify(data, null, 2), 'application/json');
+  } catch (error) {
+    showToast(`Jurisdiction report failed: ${error.message}`, true);
+  }
+}
+
+async function downloadCustomReport() {
+  const fields = window.prompt('Comma-separated fields (blank for default):', 'id,title,jurisdiction_country,stage,chili_score,updated_at') || '';
+  const format = window.prompt('Format (json/csv):', 'json') || 'json';
+
+  const params = new URLSearchParams();
+  if (fields.trim()) params.set('fields', fields.trim());
+  params.set('format', format.toLowerCase() === 'csv' ? 'csv' : 'json');
+
+  const url = `${API_BASE}/reports/custom?${params.toString()}`;
+  if (format.toLowerCase() === 'csv') {
+    window.open(url, '_blank');
+    return;
+  }
+
+  try {
+    const data = await apiJson(`/reports/custom?${params.toString()}`);
+    downloadFile('custom-report.json', JSON.stringify(data, null, 2), 'application/json');
+  } catch (error) {
+    showToast(`Custom report failed: ${error.message}`, true);
+  }
+}
+
+function downloadFile(name, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function toggleTheme() {
+  document.body.classList.toggle('dark');
+  const isDark = document.body.classList.contains('dark');
+  const button = document.getElementById('theme-toggle');
+  button.textContent = isDark ? '☀️ Light Mode' : '🌙 Dark Mode';
+  localStorage.setItem('opencode-theme', isDark ? 'dark' : 'light');
+}
+
+function restoreLocalState() {
+  const savedTheme = localStorage.getItem('opencode-theme');
+  if (savedTheme === 'dark') {
+    document.body.classList.add('dark');
+    document.getElementById('theme-toggle').textContent = '☀️ Light Mode';
+  }
+
+  const savedFilters = localStorage.getItem('opencode-filters');
+  if (savedFilters) {
+    try {
+      currentFilters = {
+        ...currentFilters,
+        ...JSON.parse(savedFilters),
+      };
+    } catch {
+      // ignore
+    }
+  }
+
+  const savedPage = localStorage.getItem('opencode-active-page') || 'dashboard';
+  showPage(savedPage);
+}
+
+function wireRiskSliders() {
+  const min = document.getElementById('filter-min-risk');
+  const max = document.getElementById('filter-max-risk');
+  const label = document.getElementById('risk-range-label');
+  const update = () => {
+    const minVal = Number(min.value);
+    const maxVal = Number(max.value);
+    label.textContent = `${Math.min(minVal, maxVal)}-${Math.max(minVal, maxVal)}`;
+  };
+  min.addEventListener('input', update);
+  max.addEventListener('input', update);
+  update();
+}
+
+function escapeHtml(str) {
+  return String(str || '').replace(/[&<>'"]/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[char]));
+}
+
+function escapeHtmlAttr(str) {
+  return escapeHtml(str).replace(/\n/g, ' ');
+}
+
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    const dialog = document.getElementById('event-dialog');
+    if (dialog.open) dialog.close();
+  }
+
+  if (event.key === '1') showPage('dashboard');
+  if (event.key === '2') showPage('events');
+  if (event.key === '3') showPage('competitors');
+  if (event.key === '4') showPage('reports');
+
+  if (event.key === '/' && !event.metaKey && !event.ctrlKey) {
+    event.preventDefault();
+    showPage('events');
+    setTimeout(() => document.getElementById('filter-search').focus(), 50);
+  }
+});
+
+document.addEventListener('DOMContentLoaded', async () => {
+  wireRiskSliders();
+  await Promise.all([loadJurisdictionOptions(), loadSavedSearches()]);
+  restoreLocalState();
+  syncFiltersToUi();
+
+  setInterval(loadDashboard, 60_000);
 });

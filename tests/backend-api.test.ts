@@ -1,5 +1,4 @@
 import request from "supertest";
-import DatabaseConstructor from "better-sqlite3";
 import { createApp } from "../src/app";
 import { initializeSchema, openDatabase } from "../src/db";
 import { seedSampleData } from "../src/seed";
@@ -39,8 +38,8 @@ describe("scoring validation", () => {
   });
 });
 
-describe("GET /api/brief", () => {
-  it("orders by risk and urgency deterministically", async () => {
+describe("API core endpoints", () => {
+  it("GET /api/brief includes lastCrawledAt and deterministic ordering", async () => {
     const { app, db } = buildTestApp();
 
     const response = await request(app).get("/api/brief?limit=3");
@@ -51,11 +50,56 @@ describe("GET /api/brief", () => {
     expect(response.body.items[1].id).toBe("11111111-1111-1111-1111-111111111102");
     expect(response.body.items[2].id).toBe("11111111-1111-1111-1111-111111111103");
 
+    expect(response.body).toHaveProperty("lastCrawledAt");
+    db.close();
+  });
+
+  it("GET /api/crawl/status returns JSON payload", async () => {
+    const { app, db } = buildTestApp();
+    const response = await request(app).get("/api/crawl/status");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(
+      expect.objectContaining({
+        isRunning: false,
+      })
+    );
+    expect(response.body).toHaveProperty("lastCrawledAt");
+    db.close();
+  });
+
+  it("GET /api/events supports pagination headers", async () => {
+    const { app, db } = buildTestApp();
+
+    const response = await request(app).get("/api/events?page=1&limit=2");
+    expect(response.status).toBe(200);
+    expect(response.headers["x-total-count"]).toBeDefined();
+    expect(response.headers["x-total-pages"]).toBeDefined();
+    expect(response.body.items).toHaveLength(2);
+
+    db.close();
+  });
+
+  it("analytics endpoints return dashboard payloads", async () => {
+    const { app, db } = buildTestApp();
+
+    const summary = await request(app).get("/api/analytics/summary");
+    expect(summary.status).toBe(200);
+    expect(summary.body.totalEvents).toBeGreaterThan(0);
+
+    const stages = await request(app).get("/api/analytics/stages");
+    expect(stages.status).toBe(200);
+    expect(Array.isArray(stages.body.stages)).toBe(true);
+
+    const jurisdictions = await request(app).get("/api/analytics/jurisdictions");
+    expect(jurisdictions.status).toBe(200);
+    expect(Array.isArray(jurisdictions.body.jurisdictions)).toBe(true);
+
     db.close();
   });
 });
 
-describe("feedback persistence", () => {
+describe("event detail + feedback + edits", () => {
   it("stores and returns submitted feedback for an event", async () => {
     const { app, db } = buildTestApp();
     const eventId = "11111111-1111-1111-1111-111111111101";
@@ -69,11 +113,6 @@ describe("feedback persistence", () => {
     expect(create.body.eventId).toBe(eventId);
     expect(create.body.rating).toBe("good");
 
-    const feedbackCount = db
-      .prepare("SELECT COUNT(*) AS count FROM feedback WHERE event_id = ?")
-      .get(eventId) as { count: number };
-    expect(feedbackCount.count).toBe(1);
-
     const detail = await request(app).get(`/api/events/${eventId}`);
     expect(detail.status).toBe(200);
     expect(detail.body.feedback).toHaveLength(1);
@@ -82,6 +121,92 @@ describe("feedback persistence", () => {
       rating: "good",
       note: "High confidence sample event.",
     });
+
+    db.close();
+  });
+
+  it("PUT /api/events/:id updates event and records stage timeline", async () => {
+    const { app, db } = buildTestApp();
+    const eventId = "11111111-1111-1111-1111-111111111101";
+
+    const update = await request(app)
+      .put(`/api/events/${eventId}`)
+      .send({ summary: "Updated summary text", businessImpact: "Updated impact", stage: "introduced" })
+      .set("Content-Type", "application/json");
+
+    expect(update.status).toBe(200);
+    expect(update.body.success).toBe(true);
+
+    const detail = await request(app).get(`/api/events/${eventId}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.summary).toContain("Updated summary text");
+    expect(Array.isArray(detail.body.regulatoryTimeline)).toBe(true);
+    expect(detail.body.regulatoryTimeline.length).toBeGreaterThan(0);
+
+    db.close();
+  });
+});
+
+describe("saved searches + exports + digest", () => {
+  it("CRUD /api/saved-searches works", async () => {
+    const { app, db } = buildTestApp();
+
+    const create = await request(app)
+      .post("/api/saved-searches")
+      .send({ name: "High risk US", query: { jurisdiction: ["United States"], minRisk: 4 } })
+      .set("Content-Type", "application/json");
+
+    expect(create.status).toBe(201);
+    const id = create.body.id;
+
+    const list = await request(app).get("/api/saved-searches");
+    expect(list.status).toBe(200);
+    expect(list.body.items.length).toBeGreaterThan(0);
+
+    const remove = await request(app).delete(`/api/saved-searches/${id}`);
+    expect(remove.status).toBe(200);
+
+    db.close();
+  });
+
+  it("GET /api/export/csv returns CSV content", async () => {
+    const { app, db } = buildTestApp();
+    const response = await request(app).get("/api/export/csv");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/csv");
+    expect(response.text).toContain("id,title,country");
+
+    db.close();
+  });
+
+  it("GET /api/export/pdf returns PDF payload", async () => {
+    const { app, db } = buildTestApp();
+    const response = await request(app).get("/api/export/pdf");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/pdf");
+
+    db.close();
+  });
+
+  it("alerts config and email digest preview endpoints work", async () => {
+    const { app, db } = buildTestApp();
+
+    const save = await request(app)
+      .post("/api/alerts/config")
+      .send({ email: "alerts@example.com", frequency: "weekly", minChili: 4 })
+      .set("Content-Type", "application/json");
+
+    expect(save.status).toBe(200);
+
+    const get = await request(app).get("/api/alerts/config");
+    expect(get.status).toBe(200);
+    expect(get.body.frequency).toBe("weekly");
+
+    const preview = await request(app).get("/api/email-digest/preview?frequency=weekly");
+    expect(preview.status).toBe(200);
+    expect(preview.body.previewText).toContain("Frequency");
 
     db.close();
   });

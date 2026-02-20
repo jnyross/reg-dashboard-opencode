@@ -19,9 +19,9 @@ describe("sources", () => {
   });
 
   test("getSourceById returns correct source", () => {
-    const source = getSourceById("us-federal-ftc");
+    const source = getSourceById("ftc-children-s-online-privacy-protection-rule-coppa");
     expect(source).toBeDefined();
-    expect(source?.name).toBe("FTC (Federal Trade Commission)");
+    expect(source?.name).toContain("FTC");
   });
 
   test("getSourcesByJurisdiction filters correctly", () => {

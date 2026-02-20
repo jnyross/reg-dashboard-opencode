@@ -1,4 +1,5 @@
 import { CrawledItem } from "./crawler";
+import { cleanText } from "./data-cleaner";
 
 export type AgeBracket = "13-15" | "16-18" | "both" | "unknown";
 
@@ -74,13 +75,15 @@ function detectStage(text: string): RegulationStage {
 function detectAgeBracket(text: string): AgeBracket {
   const lowerText = text.toLowerCase();
 
-  const hasUnder16 = /\b(under\s*16|under\s*13|under\s*15|13.*15|13-?15|younger\s*than\s*1[56])\b/.test(lowerText);
-  const has16to18 = /\b(16.*18|16-?18|16\s*to\s*18|teenager|youth|adolescent)\b/.test(lowerText);
-  const hasAllAges = /\b(minor|child|children|childhood|age\s*appropriate|safe\s*for\s*kids)\b/.test(lowerText);
+  const hasUnder16 = /\b(under\s*16|under\s*13|under\s*14|under\s*15|13.*15|13-?15|younger\s*than\s*1[56])\b/.test(lowerText);
+  const has16to18 = /\b(16.*18|16-?18|16\s*to\s*18|teenager|youth|adolescent|under\s*18)\b/.test(lowerText);
+  const hasMinorLanguage = /\b(minor|minors|child|children|childhood|age\s*appropriate|safe\s*for\s*kids|kids\s*online|parental\s*consent)\b/.test(lowerText);
 
   if (hasUnder16 && has16to18) return "both";
   if (hasUnder16) return "13-15";
-  if (has16to18 || hasAllAges) return "16-18";
+  if (has16to18 && hasMinorLanguage) return "both";
+  if (has16to18) return "16-18";
+  if (hasMinorLanguage) return "both";
   return "unknown";
 }
 
@@ -346,6 +349,7 @@ function createFallbackAnalysis(item: CrawledItem): AnalyzedItem {
   const hasSocialMedia = item.content.toLowerCase().includes("social media");
 
   const isRelevant = hasMeta || hasSocialMedia || ageBracket !== "unknown" || products.length > 0;
+  const cleanedSummary = cleanText(item.content).substring(0, 500);
 
   return {
     sourceId: item.sourceId,
@@ -359,8 +363,10 @@ function createFallbackAnalysis(item: CrawledItem): AnalyzedItem {
     stage,
     ageBracket,
     affectedProducts: products,
-    summary: item.content.substring(0, 500),
-    businessImpact: isRelevant ? "Requires review for compliance impact" : "No direct impact identified",
+    summary: cleanedSummary,
+    businessImpact: isRelevant
+      ? "Requires review for compliance impact on Meta platforms."
+      : "No direct impact identified.",
     requiredSolutions: [],
     competitorResponses: [],
     impactScore: isRelevant ? 3 : 1,

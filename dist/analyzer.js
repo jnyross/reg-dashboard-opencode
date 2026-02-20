@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.analyzeItem = analyzeItem;
 exports.analyzeItems = analyzeItems;
+const data_cleaner_1 = require("./data-cleaner");
 const STAGE_KEYWORDS = {
     proposed: ["proposed", "draft", "consultation", "request for comment"],
     introduced: ["introduced", "filed", "submitted", "bill introduced"],
@@ -34,15 +35,19 @@ function detectStage(text) {
 }
 function detectAgeBracket(text) {
     const lowerText = text.toLowerCase();
-    const hasUnder16 = /\b(under\s*16|under\s*13|under\s*15|13.*15|13-?15|younger\s*than\s*1[56])\b/.test(lowerText);
-    const has16to18 = /\b(16.*18|16-?18|16\s*to\s*18|teenager|youth|adolescent)\b/.test(lowerText);
-    const hasAllAges = /\b(minor|child|children|childhood|age\s*appropriate|safe\s*for\s*kids)\b/.test(lowerText);
+    const hasUnder16 = /\b(under\s*16|under\s*13|under\s*14|under\s*15|13.*15|13-?15|younger\s*than\s*1[56])\b/.test(lowerText);
+    const has16to18 = /\b(16.*18|16-?18|16\s*to\s*18|teenager|youth|adolescent|under\s*18)\b/.test(lowerText);
+    const hasMinorLanguage = /\b(minor|minors|child|children|childhood|age\s*appropriate|safe\s*for\s*kids|kids\s*online|parental\s*consent)\b/.test(lowerText);
     if (hasUnder16 && has16to18)
         return "both";
     if (hasUnder16)
         return "13-15";
-    if (has16to18 || hasAllAges)
+    if (has16to18 && hasMinorLanguage)
+        return "both";
+    if (has16to18)
         return "16-18";
+    if (hasMinorLanguage)
+        return "both";
     return "unknown";
 }
 function detectProducts(text) {
@@ -286,6 +291,7 @@ function createFallbackAnalysis(item) {
     const hasMeta = item.content.toLowerCase().includes("meta");
     const hasSocialMedia = item.content.toLowerCase().includes("social media");
     const isRelevant = hasMeta || hasSocialMedia || ageBracket !== "unknown" || products.length > 0;
+    const cleanedSummary = (0, data_cleaner_1.cleanText)(item.content).substring(0, 500);
     return {
         sourceId: item.sourceId,
         url: item.url,
@@ -298,8 +304,10 @@ function createFallbackAnalysis(item) {
         stage,
         ageBracket,
         affectedProducts: products,
-        summary: item.content.substring(0, 500),
-        businessImpact: isRelevant ? "Requires review for compliance impact" : "No direct impact identified",
+        summary: cleanedSummary,
+        businessImpact: isRelevant
+            ? "Requires review for compliance impact on Meta platforms."
+            : "No direct impact identified.",
         requiredSolutions: [],
         competitorResponses: [],
         impactScore: isRelevant ? 3 : 1,
