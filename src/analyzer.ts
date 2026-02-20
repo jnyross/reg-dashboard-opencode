@@ -164,6 +164,7 @@ Return ONLY valid JSON (no markdown, no code fences) in this exact format:
 
 const ANALYSIS_TIMEOUT_MS = Number(process.env.ANALYSIS_TIMEOUT_MS || 120_000);
 const ANALYSIS_RETRIES = Number(process.env.ANALYSIS_RETRIES || 3);
+let minimaxAuthFailed = false;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -171,8 +172,8 @@ function sleep(ms: number): Promise<void> {
 
 export async function analyzeItem(item: CrawledItem): Promise<AnalyzedItem> {
   const apiKey = process.env.MINIMAX_API_KEY;
-  
-  if (!apiKey) {
+
+  if (!apiKey || minimaxAuthFailed) {
     return createFallbackAnalysis(item);
   }
 
@@ -199,6 +200,7 @@ export async function analyzeItem(item: CrawledItem): Promise<AnalyzedItem> {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
             "x-api-key": apiKey,
             "anthropic-version": "2023-06-01",
           },
@@ -248,6 +250,7 @@ export async function analyzeItem(item: CrawledItem): Promise<AnalyzedItem> {
         const isAuthError = /API error:\s*401/.test(message) || /authentication_error/i.test(message);
 
         if (isAuthError) {
+          minimaxAuthFailed = true;
           break;
         }
 
