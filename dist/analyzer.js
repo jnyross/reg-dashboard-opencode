@@ -1,5 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.canonicalizeCountry = canonicalizeCountry;
+exports.resolveCanonicalJurisdiction = resolveCanonicalJurisdiction;
+exports.deriveRiskScores = deriveRiskScores;
 exports.analyzeItem = analyzeItem;
 exports.analyzeItems = analyzeItems;
 const data_cleaner_1 = require("./data-cleaner");
@@ -15,15 +18,111 @@ const STAGE_KEYWORDS = {
     rejected: ["rejected", "denied", "dismissed", "struck down"],
 };
 const PRODUCT_KEYWORDS = {
-    "Facebook": ["facebook", "fb", "meta facebook"],
-    "Instagram": ["instagram", "ig"],
-    "WhatsApp": ["whatsapp", "wa"],
-    "Threads": ["threads"],
+    Facebook: ["facebook", "fb", "meta facebook"],
+    Instagram: ["instagram", "ig"],
+    WhatsApp: ["whatsapp", "wa"],
+    Threads: ["threads"],
     "Meta Quest": ["quest", "vr", "virtual reality", "metaverse"],
     "Reality Labs": ["reality labs"],
     "Meta AI": ["meta ai", "llama", "ai assistant"],
-    "Advertising": ["advertising", "ad", "ads", "targeting"],
+    Advertising: ["advertising", "ad", "ads", "targeting"],
 };
+const UNKNOWN_COUNTRY_VALUES = new Set([
+    "",
+    "unknown",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "not specified",
+    "unspecified",
+]);
+const COUNTRY_ALIASES = [
+    { country: "United States", pattern: /\b(united\s*states|u\.?s\.?a?|america|us federal|congress|ftc)\b/i },
+    { country: "European Union", pattern: /\b(european\s*union|eu|european\s*commission|europa\.eu|edpb|dsa)\b/i },
+    { country: "United Kingdom", pattern: /\b(united\s*kingdom|u\.?k\.?|britain|england|ofcom|ico\.org\.uk|gov\.uk)\b/i },
+    { country: "Australia", pattern: /\b(australia|australian|esafety|oaic)\b/i },
+    { country: "Canada", pattern: /\b(canada|canadian|crtc|priv\.gc\.ca)\b/i },
+    { country: "Germany", pattern: /\b(germany|german|deutschland|bundestag|bfdi)\b/i },
+    { country: "France", pattern: /\b(france|french|cnil)\b/i },
+    { country: "Ireland", pattern: /\b(ireland|irish|data\s*protection\s*commission)\b/i },
+    { country: "Italy", pattern: /\b(italy|italian|garante)\b/i },
+    { country: "Spain", pattern: /\b(spain|spanish|aepd)\b/i },
+    { country: "Netherlands", pattern: /\b(netherlands|dutch|autoriteit\s*persoonsgegevens)\b/i },
+    { country: "Belgium", pattern: /\b(belgium|belgian)\b/i },
+    { country: "Singapore", pattern: /\b(singapore|singaporean|pdpc)\b/i },
+    { country: "Japan", pattern: /\b(japan|japanese|ppc)\b/i },
+    { country: "Brazil", pattern: /\b(brazil|brazilian|lgpd|anpd)\b/i },
+    { country: "India", pattern: /\b(india|indian|digital\s*personal\s*data|dpdp)\b/i },
+    { country: "China", pattern: /\b(china|chinese|cac|pipl)\b/i },
+    { country: "South Korea", pattern: /\b(south\s*korea|korean|pipc)\b/i },
+    { country: "South Africa", pattern: /\b(south\s*africa|popia)\b/i },
+    { country: "Nigeria", pattern: /\b(nigeria|nigerian)\b/i },
+    { country: "UAE", pattern: /\b(uae|united\s*arab\s*emirates|dubai|abu\s*dhabi)\b/i },
+    { country: "Global", pattern: /\b(global|worldwide|cross-border)\b/i },
+    { country: "International", pattern: /\b(international|un|oecd|g7|g20|wef)\b/i },
+    { country: "APAC", pattern: /\b(apac|asia[-\s]?pacific)\b/i },
+    { country: "Latin America", pattern: /\b(latin\s*america|latam)\b/i },
+    { country: "Africa", pattern: /\b(africa)\b/i },
+    { country: "Africa & Middle East", pattern: /\b(africa\s*&\s*middle\s*east|middle\s*east\s*&\s*africa|mea)\b/i },
+];
+const US_STATE_ALIASES = {
+    ca: "California",
+    california: "California",
+    ny: "New York",
+    "new york": "New York",
+    tx: "Texas",
+    texas: "Texas",
+    fl: "Florida",
+    florida: "Florida",
+    wa: "Washington",
+    washington: "Washington",
+    ar: "Arkansas",
+    arkansas: "Arkansas",
+};
+const SEVERE_RISK_KEYWORDS = [
+    "fine",
+    "penalty",
+    "sanction",
+    "enforcement",
+    "mandatory",
+    "must",
+    "prohibit",
+    "ban",
+    "criminal",
+    "violation",
+    "injunction",
+    "consent decree",
+    "age verification",
+    "default safety",
+    "algorithmic audit",
+    "strict liability",
+];
+const MODERATE_RISK_KEYWORDS = [
+    "bill",
+    "act",
+    "regulation",
+    "law",
+    "consultation",
+    "guidance",
+    "framework",
+    "code",
+    "children",
+    "minors",
+    "teens",
+    "under 16",
+    "social media",
+    "privacy",
+];
+function clampScore(value, fallback = 3) {
+    if (typeof value !== "number" || Number.isNaN(value))
+        return fallback;
+    return Math.min(5, Math.max(1, Math.round(value)));
+}
+function hasKeyword(text, keywords) {
+    const lower = text.toLowerCase();
+    return keywords.some((keyword) => lower.includes(keyword));
+}
 function detectStage(text) {
     const lowerText = text.toLowerCase();
     for (const [stage, keywords] of Object.entries(STAGE_KEYWORDS)) {
@@ -52,38 +151,198 @@ function detectAgeBracket(text) {
 }
 function detectProducts(text) {
     const detected = [];
+    const lower = text.toLowerCase();
     for (const [product, keywords] of Object.entries(PRODUCT_KEYWORDS)) {
-        if (keywords.some((kw) => text.toLowerCase().includes(kw))) {
+        if (keywords.some((kw) => lower.includes(kw))) {
             detected.push(product);
         }
     }
     return [...new Set(detected)];
 }
-function extractJurisdiction(text) {
-    const countryPatterns = {
-        "United States": /\b(united\s*states|u\.?s\.?|usa|america)\b/i,
-        "European Union": /\b(european\s*union|eu|european\s*commission|europe)\b/i,
-        "United Kingdom": /\b(united\s*kingdom|u\.?k\.?|britain|england|ofcom)\b/i,
-        Australia: /\b(australia|australian|aussie)\b/i,
-        Canada: /\b(canada|canadian|crtc)\b/i,
-        Germany: /\b(germany|german|deutschland|bundestag)\b/i,
-        France: /\b(france|french|france\s*cnil)\b/i,
-        Ireland: /\b(ireland|irish|data\s*protection\s*commission)\b/i,
-        Singapore: /\b(singapore|singaporean|pdpc)\b/i,
-        Japan: /\b(japan|japanese|ppm)\b/i,
-        Brazil: /\b(brazil|brazilian|lgpd)\b/i,
-        India: /\b(india|indian|digital\s*personal\s*data)\b/i,
-    };
-    for (const [country, pattern] of Object.entries(countryPatterns)) {
-        if (pattern.test(text)) {
-            const stateMatch = text.match(/\b(california|new\s*york|texas|florida|washington)\b/i);
-            if (country === "United States" && stateMatch) {
-                return { country, state: stateMatch[1] };
-            }
-            return { country };
+function normalizeState(value) {
+    if (!value)
+        return undefined;
+    const normalized = value.replace(/\s+/g, " ").trim().toLowerCase();
+    return US_STATE_ALIASES[normalized];
+}
+function canonicalizeCountry(value) {
+    if (!value)
+        return undefined;
+    const cleaned = value.replace(/[._-]+/g, " ").replace(/\s+/g, " ").trim();
+    if (!cleaned)
+        return undefined;
+    const lowered = cleaned.toLowerCase();
+    if (UNKNOWN_COUNTRY_VALUES.has(lowered)) {
+        return undefined;
+    }
+    for (const entry of COUNTRY_ALIASES) {
+        if (entry.pattern.test(cleaned)) {
+            return entry.country;
         }
     }
-    return { country: "Unknown" };
+    return cleaned;
+}
+function inferCountryFromUrl(url) {
+    if (!url)
+        return undefined;
+    try {
+        const { hostname } = new URL(url);
+        const host = hostname.toLowerCase();
+        if (host.endsWith("gov.uk") || host.endsWith("ico.org.uk") || host.endsWith("parliament.uk"))
+            return "United Kingdom";
+        if (host.endsWith("europa.eu") || host.endsWith("edpb.europa.eu"))
+            return "European Union";
+        if (host.endsWith("gc.ca") || host.endsWith("canada.ca") || host.endsWith("priv.gc.ca"))
+            return "Canada";
+        if (host.endsWith("gouv.fr") || host.endsWith("cnil.fr"))
+            return "France";
+        if (host.endsWith("bund.de") || host.endsWith("bfdi.bund.de"))
+            return "Germany";
+        if (host.endsWith("gov.au") || host.endsWith("esafety.gov.au") || host.endsWith("oaic.gov.au"))
+            return "Australia";
+        if (host.endsWith("gov.sg") || host.includes("pdpc.gov.sg"))
+            return "Singapore";
+        if (host.endsWith("gov.br") || host.endsWith("anpd.gov.br"))
+            return "Brazil";
+        if (host.endsWith("gov.in"))
+            return "India";
+        if (host.endsWith("gov") || host.endsWith("state.gov") || host.endsWith("federalregister.gov"))
+            return "United States";
+        if (host === "x.com" || host.endsWith("x.com") || host === "twitter.com" || host.endsWith("twitter.com"))
+            return "Global";
+    }
+    catch {
+        return undefined;
+    }
+    return undefined;
+}
+function inferJurisdictionFromText(text) {
+    if (!text.trim())
+        return {};
+    for (const entry of COUNTRY_ALIASES) {
+        if (entry.pattern.test(text)) {
+            const stateMatch = text.match(/\b(california|new\s*york|texas|florida|washington|arkansas|ca|ny|tx|fl|wa|ar)\b/i);
+            const state = stateMatch?.[1] ? normalizeState(stateMatch[1]) : undefined;
+            if (entry.country === "United States") {
+                return { country: "United States", state };
+            }
+            return { country: entry.country };
+        }
+    }
+    return {};
+}
+function resolveCanonicalJurisdiction(signals) {
+    const hintedCountry = canonicalizeCountry(signals.hintedCountry);
+    const hintedState = normalizeState(signals.hintedState);
+    const sourceCountry = canonicalizeCountry(signals.sourceCountry);
+    const sourceState = normalizeState(signals.sourceState);
+    const textInference = inferJurisdictionFromText(signals.text || "");
+    const textCountry = canonicalizeCountry(textInference.country);
+    const textState = normalizeState(textInference.state);
+    const urlCountry = inferCountryFromUrl(signals.url);
+    const country = hintedCountry || textCountry || sourceCountry || urlCountry || "Unknown";
+    const state = country === "United States"
+        ? hintedState || textState || sourceState
+        : undefined;
+    return { country, state };
+}
+function resolveJurisdictionForItem(item, parsedCountry, parsedState) {
+    return resolveCanonicalJurisdiction({
+        text: [item.sourceName, item.sourceDescription, item.title, item.content].join("\n"),
+        url: item.url,
+        hintedCountry: parsedCountry,
+        hintedState: parsedState,
+        sourceCountry: item.sourceJurisdictionCountry,
+        sourceState: item.sourceJurisdictionState,
+    });
+}
+function normalizeStage(value) {
+    const allowedStages = new Set([
+        "proposed",
+        "introduced",
+        "committee_review",
+        "passed",
+        "enacted",
+        "effective",
+        "amended",
+        "withdrawn",
+        "rejected",
+    ]);
+    let stage = String(value || "proposed").toLowerCase().replace(/\s+/g, "_");
+    if (!allowedStages.has(stage)) {
+        if (/enforc|in.force|active|implement/i.test(stage))
+            stage = "effective";
+        else if (/sign|law|legislat/i.test(stage))
+            stage = "enacted";
+        else if (/pass|approv|adopt/i.test(stage))
+            stage = "passed";
+        else if (/draft|consult|review/i.test(stage))
+            stage = "proposed";
+        else if (/amend|revis|updat/i.test(stage))
+            stage = "amended";
+        else
+            stage = "proposed";
+    }
+    return stage;
+}
+function normalizeAgeBracket(value) {
+    const allowedBrackets = new Set(["13-15", "16-18", "both", "unknown"]);
+    const ageBracket = String(value || "unknown");
+    return (allowedBrackets.has(ageBracket) ? ageBracket : "both");
+}
+function deriveRiskScores(signals) {
+    if (!signals.isRelevant) {
+        return {
+            impactScore: 1,
+            likelihoodScore: 1,
+            confidenceScore: 1,
+            chiliScore: 1,
+        };
+    }
+    const stage = normalizeStage(signals.stage);
+    const ageBracket = normalizeAgeBracket(signals.ageBracket);
+    const lowerText = (signals.text || "").toLowerCase();
+    const isLateStage = stage === "effective" || stage === "enacted" || stage === "passed";
+    const baselineLikelihoodByStage = {
+        proposed: 2,
+        introduced: 3,
+        committee_review: 3,
+        passed: 4,
+        enacted: 4,
+        effective: 4,
+        amended: 3,
+        withdrawn: 1,
+        rejected: 1,
+    };
+    let impactScore = clampScore(signals.baseImpact, 2);
+    let likelihoodScore = clampScore(signals.baseLikelihood, baselineLikelihoodByStage[stage]);
+    if (ageBracket === "13-15" || ageBracket === "both") {
+        impactScore = Math.min(5, impactScore + 1);
+    }
+    const severeRisk = hasKeyword(lowerText, SEVERE_RISK_KEYWORDS);
+    const moderateRisk = hasKeyword(lowerText, MODERATE_RISK_KEYWORDS);
+    if (moderateRisk) {
+        impactScore = Math.max(impactScore, 3);
+    }
+    if (severeRisk) {
+        impactScore = Math.max(impactScore, 4);
+        likelihoodScore = Math.max(likelihoodScore, 4);
+    }
+    let derivedChili = clampScore(Math.round((impactScore + likelihoodScore) / 2), 3);
+    if (severeRisk && isLateStage) {
+        derivedChili = Math.max(derivedChili, 5);
+    }
+    else if (severeRisk || (isLateStage && (ageBracket === "13-15" || ageBracket === "both"))) {
+        derivedChili = Math.max(derivedChili, 4);
+    }
+    const modelChili = clampScore(signals.baseChili, 0);
+    const chiliScore = modelChili === 0 ? derivedChili : Math.max(modelChili, derivedChili);
+    return {
+        impactScore,
+        likelihoodScore,
+        confidenceScore: clampScore(signals.baseConfidence, 3),
+        chiliScore,
+    };
 }
 const ANALYSIS_PROMPT = `You are an expert analyst reviewing regulatory news for Meta. Analyze this regulatory item and extract structured data.
 
@@ -133,10 +392,10 @@ async function analyzeItem(item) {
         return createFallbackAnalysis(item);
     }
     try {
-        // Include source context (name, URL, description) for better relevance determination
         const inputText = [
             `Source: ${item.sourceName || "Unknown"}`,
             `Source Description: ${item.sourceDescription || ""}`,
+            `Source Jurisdiction: ${item.sourceJurisdictionCountry || ""}${item.sourceJurisdictionState ? ` / ${item.sourceJurisdictionState}` : ""}`,
             `URL: ${item.url}`,
             `Title: ${item.title}`,
             "",
@@ -172,17 +431,15 @@ async function analyzeItem(item) {
                     const errBody = await response.text().catch(() => "");
                     throw new Error(`API error: ${response.status} ${errBody.slice(0, 200)}`);
                 }
-                const data = await response.json();
+                const data = (await response.json());
                 const rawContent = data.content?.find((c) => c.type === "text")?.text || data.content?.[0]?.text || "";
                 if (!rawContent) {
                     throw new Error("Empty response from API");
                 }
-                // Strip markdown fences if present
                 let cleanContent = rawContent.trim();
                 if (cleanContent.startsWith("```")) {
                     cleanContent = cleanContent.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
                 }
-                // Extract JSON object
                 const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
                 if (!jsonMatch)
                     throw new Error("No JSON found in response");
@@ -210,6 +467,7 @@ async function analyzeItem(item) {
             throw lastError instanceof Error ? lastError : new Error(String(lastError));
         }
         if (!parsed.isRelevant) {
+            const jurisdiction = resolveJurisdictionForItem(item);
             return {
                 sourceId: item.sourceId,
                 url: item.url,
@@ -217,7 +475,8 @@ async function analyzeItem(item) {
                 rawContent: item.content,
                 publishedDate: item.publishedDate,
                 isRelevant: false,
-                jurisdictionCountry: "Unknown",
+                jurisdictionCountry: jurisdiction.country,
+                jurisdictionState: jurisdiction.state,
                 stage: "proposed",
                 ageBracket: "unknown",
                 affectedProducts: [],
@@ -232,29 +491,19 @@ async function analyzeItem(item) {
                 analyzedAt: new Date().toISOString(),
             };
         }
-        // Normalize stage to allowed values
-        const allowedStages = new Set(["proposed", "introduced", "committee_review", "passed", "enacted", "effective", "amended", "withdrawn", "rejected"]);
-        let stage = String(parsed.stage || "proposed").toLowerCase().replace(/\s+/g, "_");
-        if (!allowedStages.has(stage)) {
-            // Try common mappings
-            if (/enforc|in.force|active|implement/i.test(stage))
-                stage = "effective";
-            else if (/sign|law|legislat/i.test(stage))
-                stage = "enacted";
-            else if (/pass|approv|adopt/i.test(stage))
-                stage = "passed";
-            else if (/draft|consult|review/i.test(stage))
-                stage = "proposed";
-            else if (/amend|revis|updat/i.test(stage))
-                stage = "amended";
-            else
-                stage = "proposed";
-        }
-        // Normalize ageBracket
-        const allowedBrackets = new Set(["13-15", "16-18", "both", "unknown"]);
-        let ageBracket = String(parsed.ageBracket || "unknown");
-        if (!allowedBrackets.has(ageBracket))
-            ageBracket = "both";
+        const stage = normalizeStage(parsed.stage);
+        const ageBracket = normalizeAgeBracket(parsed.ageBracket);
+        const jurisdiction = resolveJurisdictionForItem(item, parsed.jurisdictionCountry, parsed.jurisdictionState);
+        const risk = deriveRiskScores({
+            text: [item.title, item.content, parsed.summary || "", parsed.businessImpact || ""].join("\n"),
+            stage,
+            ageBracket,
+            isRelevant: true,
+            baseImpact: parsed.impactScore,
+            baseLikelihood: parsed.likelihoodScore,
+            baseConfidence: parsed.confidenceScore,
+            baseChili: parsed.chiliScore,
+        });
         return {
             sourceId: item.sourceId,
             url: item.url,
@@ -262,19 +511,19 @@ async function analyzeItem(item) {
             rawContent: item.content,
             publishedDate: item.publishedDate,
             isRelevant: true,
-            jurisdictionCountry: parsed.jurisdictionCountry || "Unknown",
-            jurisdictionState: parsed.jurisdictionState,
-            stage: stage,
-            ageBracket: ageBracket,
+            jurisdictionCountry: jurisdiction.country,
+            jurisdictionState: jurisdiction.state,
+            stage,
+            ageBracket,
             affectedProducts: Array.isArray(parsed.affectedProducts) ? parsed.affectedProducts : [],
             summary: parsed.summary || "",
             businessImpact: parsed.businessImpact || "",
             requiredSolutions: Array.isArray(parsed.requiredSolutions) ? parsed.requiredSolutions : [],
             competitorResponses: Array.isArray(parsed.competitorResponses) ? parsed.competitorResponses : [],
-            impactScore: Math.min(5, Math.max(1, Math.round(parsed.impactScore || 3))),
-            likelihoodScore: Math.min(5, Math.max(1, Math.round(parsed.likelihoodScore || 3))),
-            confidenceScore: Math.min(5, Math.max(1, Math.round(parsed.confidenceScore || 3))),
-            chiliScore: Math.min(5, Math.max(1, Math.round(parsed.chiliScore || 3))),
+            impactScore: risk.impactScore,
+            likelihoodScore: risk.likelihoodScore,
+            confidenceScore: risk.confidenceScore,
+            chiliScore: risk.chiliScore,
             analyzedAt: new Date().toISOString(),
         };
     }
@@ -284,14 +533,23 @@ async function analyzeItem(item) {
     }
 }
 function createFallbackAnalysis(item) {
-    const jurisdiction = extractJurisdiction(item.content);
-    const stage = detectStage(item.content);
-    const ageBracket = detectAgeBracket(item.content);
-    const products = detectProducts(item.content);
-    const hasMeta = item.content.toLowerCase().includes("meta");
-    const hasSocialMedia = item.content.toLowerCase().includes("social media");
-    const isRelevant = hasMeta || hasSocialMedia || ageBracket !== "unknown" || products.length > 0;
+    const fullText = [item.sourceName, item.sourceDescription, item.title, item.content].join("\n");
+    const stage = detectStage(fullText);
+    const ageBracket = detectAgeBracket(fullText);
+    const products = detectProducts(fullText);
+    const jurisdiction = resolveJurisdictionForItem(item);
+    const lowerContent = fullText.toLowerCase();
+    const hasMeta = lowerContent.includes("meta") || lowerContent.includes("facebook") || lowerContent.includes("instagram") || lowerContent.includes("threads");
+    const hasSocialMedia = lowerContent.includes("social media") || lowerContent.includes("platform");
+    const hasRegulatorySignal = hasKeyword(lowerContent, MODERATE_RISK_KEYWORDS) || hasKeyword(lowerContent, SEVERE_RISK_KEYWORDS);
+    const isRelevant = hasMeta || hasSocialMedia || hasRegulatorySignal || ageBracket !== "unknown" || products.length > 0;
     const cleanedSummary = (0, data_cleaner_1.cleanText)(item.content).substring(0, 500);
+    const risk = deriveRiskScores({
+        text: fullText,
+        stage,
+        ageBracket,
+        isRelevant,
+    });
     return {
         sourceId: item.sourceId,
         url: item.url,
@@ -310,10 +568,10 @@ function createFallbackAnalysis(item) {
             : "No direct impact identified.",
         requiredSolutions: [],
         competitorResponses: [],
-        impactScore: isRelevant ? 3 : 1,
-        likelihoodScore: isRelevant ? 3 : 1,
-        confidenceScore: 2,
-        chiliScore: isRelevant ? 3 : 1,
+        impactScore: risk.impactScore,
+        likelihoodScore: risk.likelihoodScore,
+        confidenceScore: risk.confidenceScore,
+        chiliScore: risk.chiliScore,
         analyzedAt: new Date().toISOString(),
     };
 }

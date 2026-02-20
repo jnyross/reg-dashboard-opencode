@@ -168,6 +168,8 @@ export async function crawlTwitterSearchSource(
       sourceId: source.id,
       sourceName: source.name,
       sourceDescription: source.description,
+      sourceJurisdictionCountry: source.jurisdictionCountry,
+      sourceJurisdictionState: source.jurisdictionState,
       url,
       title: cleanText.slice(0, 180) || `Tweet by ${author}`,
       content: [

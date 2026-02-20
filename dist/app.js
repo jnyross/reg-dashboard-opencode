@@ -7,6 +7,7 @@ exports.createApp = createApp;
 const express_1 = __importDefault(require("express"));
 const node_path_1 = __importDefault(require("node:path"));
 const pipeline_1 = require("./pipeline");
+const backfill_1 = require("./backfill");
 const data_cleaner_1 = require("./data-cleaner");
 const allowedStages = [
     "proposed",
@@ -483,6 +484,13 @@ function createHighRiskNotifications(db, startedAt, minChili) {
 function createApp(db) {
     ensureAuxiliaryTables(db);
     (0, data_cleaner_1.runDataCleanup)(db);
+    const startupBackfill = (0, backfill_1.backfillEventRiskAndJurisdiction)(db);
+    if (startupBackfill.updated > 0) {
+        console.log(`Startup backfill updated ${startupBackfill.updated}/${startupBackfill.scanned} events `
+            + `(risk: ${startupBackfill.riskUpdated}, jurisdiction: ${startupBackfill.jurisdictionUpdated}, `
+            + `unknown: ${startupBackfill.unknownBefore}→${startupBackfill.unknownAfter}, `
+            + `high-risk: ${startupBackfill.highRiskBefore}→${startupBackfill.highRiskAfter})`);
+    }
     const app = (0, express_1.default)();
     app.use(express_1.default.json());
     app.use(express_1.default.static(node_path_1.default.join(process.cwd(), "web")));
@@ -843,6 +851,7 @@ function createApp(db) {
             const startedAt = new Date().toISOString();
             const result = await (0, pipeline_1.runPipeline)(db, sourceIds);
             const cleanup = (0, data_cleaner_1.runDataCleanup)(db);
+            const backfill = (0, backfill_1.backfillEventRiskAndJurisdiction)(db);
             const config = db.prepare("SELECT * FROM alert_configs LIMIT 1").get();
             const minChili = config?.min_chili ?? 4;
             const notificationCount = createHighRiskNotifications(db, startedAt, minChili);
@@ -862,6 +871,7 @@ function createApp(db) {
                 status,
                 itemsSaved: result.itemsSaved,
                 highRiskNotifications: notificationCount,
+                backfill,
                 completedAt: new Date().toISOString(),
             });
             res.json({
@@ -870,6 +880,7 @@ function createApp(db) {
                 status,
                 ...result,
                 cleanup,
+                backfill,
                 highRiskNotifications: notificationCount,
             });
         }
@@ -1234,31 +1245,65 @@ function createApp(db) {
         res.send(lines.join("\n"));
     });
     app.get("/api/export/pdf", (req, res) => {
+        const filters = {
+            search: typeof req.query.search === "string" ? req.query.search.trim() : undefined,
+            jurisdictions: parseList(typeof req.query.jurisdiction === "string" ? req.query.jurisdiction : undefined),
+            stages: parseStageList(typeof req.query.stage === "string" ? req.query.stage : undefined),
+            ageBrackets: parseAgeBracketList(typeof req.query.ageBracket === "string" ? req.query.ageBracket : undefined),
+            minRisk: parseSingleInt(req.query.minRisk, 1, 5),
+            maxRisk: parseSingleInt(req.query.maxRisk, 1, 5),
+            dateFrom: typeof req.query.dateFrom === "string" ? req.query.dateFrom : undefined,
+            dateTo: typeof req.query.dateTo === "string" ? req.query.dateTo : undefined,
+            under16Only: String(req.query.under16Only ?? "").toLowerCase() === "true",
+        };
+        const { where, params } = buildWhereClause(filters);
         const summary = db
             .prepare(`
         SELECT
           COUNT(*) AS totalEvents,
           ROUND(AVG(chili_score), 2) AS avgRisk,
           SUM(CASE WHEN chili_score >= 4 THEN 1 ELSE 0 END) AS highRisk
-        FROM regulation_events
+        FROM regulation_events e
+        ${where}
       `)
-            .get();
+            .get(...params);
         const topEvents = db
             .prepare(`
         SELECT title, jurisdiction_country, stage, chili_score, updated_at
-        FROM regulation_events
+        FROM regulation_events e
+        ${where}
         ORDER BY chili_score DESC, updated_at DESC
         LIMIT 12
       `)
-            .all();
+            .all(...params);
+        const activeFilters = [];
+        if (filters.minRisk !== undefined)
+            activeFilters.push(`minRisk=${filters.minRisk}`);
+        if (filters.maxRisk !== undefined)
+            activeFilters.push(`maxRisk=${filters.maxRisk}`);
+        if (filters.jurisdictions.length > 0)
+            activeFilters.push(`jurisdiction=${filters.jurisdictions.join("|")}`);
+        if (filters.stages.length > 0)
+            activeFilters.push(`stage=${filters.stages.join("|")}`);
+        if (filters.ageBrackets.length > 0)
+            activeFilters.push(`ageBracket=${filters.ageBrackets.join("|")}`);
+        if (filters.under16Only)
+            activeFilters.push("under16Only=true");
+        if (filters.search)
+            activeFilters.push(`search=${filters.search}`);
+        if (filters.dateFrom)
+            activeFilters.push(`dateFrom=${filters.dateFrom}`);
+        if (filters.dateTo)
+            activeFilters.push(`dateTo=${filters.dateTo}`);
         const lines = [
             `Generated: ${new Date().toISOString()}`,
             `Last crawled: ${getLastCrawledAt(db) ?? "N/A"}`,
+            `Filters: ${activeFilters.length > 0 ? activeFilters.join(", ") : "none"}`,
             "",
             "Executive Summary",
             `- Total events: ${summary.totalEvents}`,
-            `- Average risk score: ${summary.avgRisk}`,
-            `- High-risk events (4-5): ${summary.highRisk}`,
+            `- Average risk score: ${summary.avgRisk ?? 0}`,
+            `- High-risk events (4-5): ${summary.highRisk ?? 0}`,
             "",
             "Trend and Heatmap Highlights",
             "- Risk heatmap available in dashboard (jurisdiction grid).",
@@ -1266,7 +1311,9 @@ function createApp(db) {
             "- Stage pipeline available in dashboard.",
             "",
             "Top High-Risk Events",
-            ...topEvents.map((event, index) => `${index + 1}. ${(0, data_cleaner_1.cleanTitle)(event.title)} | ${event.jurisdiction_country} | ${event.stage} | ${event.chili_score}🌶️ | ${event.updated_at}`),
+            ...(topEvents.length > 0
+                ? topEvents.map((event, index) => `${index + 1}. ${(0, data_cleaner_1.cleanTitle)(event.title)} | ${event.jurisdiction_country} | ${event.stage} | ${event.chili_score}🌶️ | ${event.updated_at}`)
+                : ["No events matched the selected filter set."]),
         ];
         const pdfBuffer = buildSimplePdf("Regulatory Intelligence Executive Brief", lines);
         res.setHeader("Content-Type", "application/pdf");

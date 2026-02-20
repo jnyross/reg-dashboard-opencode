@@ -271,7 +271,7 @@ export function upsertAnalyzedItem(
   const cleanedImpact = normalizeBusinessImpact(item);
   const cleanedRawContent = cleanText(item.rawContent).substring(0, 10000);
 
-  const eventId = generateEventId(item.jurisdictionCountry, item.jurisdictionState, cleanedTitle);
+  const generatedEventId = generateEventId(item.jurisdictionCountry, item.jurisdictionState, cleanedTitle);
   const jurisdictionState = item.jurisdictionState || "";
 
   const existing = db.prepare(
@@ -287,6 +287,8 @@ export function upsertAnalyzedItem(
     stage: string;
     created_at: string;
   } | undefined;
+
+  const eventId = existing?.id ?? generatedEventId;
 
   let status = "new";
   const isNew = !existing;

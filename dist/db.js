@@ -223,7 +223,7 @@ function upsertAnalyzedItem(db, item, reliabilityTier) {
     const cleanedSummary = normalizeSummary(item);
     const cleanedImpact = normalizeBusinessImpact(item);
     const cleanedRawContent = (0, data_cleaner_1.cleanText)(item.rawContent).substring(0, 10000);
-    const eventId = generateEventId(item.jurisdictionCountry, item.jurisdictionState, cleanedTitle);
+    const generatedEventId = generateEventId(item.jurisdictionCountry, item.jurisdictionState, cleanedTitle);
     const jurisdictionState = item.jurisdictionState || "";
     const existing = db.prepare(`SELECT id, stage, created_at
      FROM regulation_events
@@ -232,6 +232,7 @@ function upsertAnalyzedItem(db, item, reliabilityTier) {
        AND lower(title) = lower(?)
      ORDER BY updated_at DESC
      LIMIT 1`).get(item.jurisdictionCountry, jurisdictionState, cleanedTitle);
+    const eventId = existing?.id ?? generatedEventId;
     let status = "new";
     const isNew = !existing;
     let statusChanged = false;

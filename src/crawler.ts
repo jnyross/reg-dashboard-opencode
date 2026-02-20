@@ -8,6 +8,8 @@ export interface CrawledItem {
   sourceId: string;
   sourceName: string;
   sourceDescription: string;
+  sourceJurisdictionCountry?: string;
+  sourceJurisdictionState?: string;
   url: string;
   title: string;
   content: string;
@@ -171,6 +173,8 @@ function parseRSSFeed(xml: string, source: RegulatorySource): CrawledItem[] {
         sourceId: source.id,
         sourceName: source.name,
         sourceDescription: source.description,
+        sourceJurisdictionCountry: source.jurisdictionCountry,
+        sourceJurisdictionState: source.jurisdictionState,
         url: Array.isArray(link) ? link[0]?.["@_href"] || link[0] || "" : link,
         title: String(title).trim(),
         content: cleanContent.substring(0, MAX_TEXT_LENGTH),
@@ -214,6 +218,8 @@ function extractFromHTML(html: string, source: RegulatorySource): CrawledItem[] 
       sourceId: source.id,
       sourceName: source.name,
       sourceDescription: source.description,
+      sourceJurisdictionCountry: source.jurisdictionCountry,
+      sourceJurisdictionState: source.jurisdictionState,
       url: source.url,
       title,
       content: content.substring(0, MAX_TEXT_LENGTH),
@@ -261,6 +267,8 @@ export async function crawlSource(source: RegulatorySource): Promise<CrawlResult
           sourceId: source.id,
           sourceName: source.name,
           sourceDescription: source.description,
+          sourceJurisdictionCountry: source.jurisdictionCountry,
+          sourceJurisdictionState: source.jurisdictionState,
           url: source.url,
           title: source.name,
           content: [
