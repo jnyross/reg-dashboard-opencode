@@ -361,8 +361,9 @@ export function isUnder16Related(title: string, summary: string, rawContent: str
     /\bdsa\b/,
     /protection\s+of\s+minors/,
     /protecting\s+children/,
-    /social\s+media\s+age/,
+    /social\s+media\s+(minimum\s+)?age/,
     /social\s+media\s+ban/,
+    /social\s+media\s+cap/,
     /children\s+and\s+adolescents/,
     /children'?s\s+data/,
     /child\s+data/,
@@ -378,7 +379,14 @@ export function isUnder16Related(title: string, summary: string, rawContent: str
     /child\s+exploitation/,
   ];
 
-  return strongPatterns.some((pattern) => pattern.test(combined));
+  if (strongPatterns.some((pattern) => pattern.test(combined))) {
+    return true;
+  }
+
+  const youthPattern = /\b(child|children|kid|kids|minor|minors|teen|teens|teenager|youth|adolescent|students?)\b/;
+  const regulatoryPattern = /\b(regulation|law|bill|act|policy|privacy|safety|compliance|consent|verification|platform|social\s+media|online)\b/;
+
+  return youthPattern.test(combined) && regulatoryPattern.test(combined);
 }
 
 /** Run the data cleanup migration */
