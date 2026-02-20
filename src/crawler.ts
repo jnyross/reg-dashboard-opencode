@@ -1,6 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import TurndownService from "turndown";
-import { RegulatorySource, sources } from "./sources";
+import { RegulatorySource, sources, twitterSearchSources } from "./sources";
+import { crawlTwitterSearchSource } from "./twitter-crawler";
 
 export interface CrawledItem {
   sourceId: string;
@@ -32,6 +33,11 @@ const USER_AGENT =
 const MAX_TEXT_LENGTH = 12_000;
 const CRAWL_TIMEOUT_MS = Number(process.env.CRAWL_TIMEOUT_MS || 90_000);
 const CRAWL_RETRIES = Number(process.env.CRAWL_RETRIES || 3);
+const TWITTER_INTER_QUERY_DELAY_MS = 1_500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function fetchWithTimeout(
   url: string,
@@ -77,7 +83,7 @@ async function fetchWithRetry(url: string, timeoutMs = CRAWL_TIMEOUT_MS): Promis
 
     if (attempt < CRAWL_RETRIES) {
       const backoffMs = 2000 * attempt;
-      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      await sleep(backoffMs);
     }
   }
 
@@ -108,15 +114,15 @@ function stripHtml(html: string): string {
 /** Extract meta description / og:description as fallback content */
 function extractMetaContent(html: string): string {
   const parts: string[] = [];
-  
+
   const ogDesc = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i)
     ?? html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:description["']/i);
   if (ogDesc?.[1]) parts.push(ogDesc[1]);
-  
+
   const metaDesc = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i)
     ?? html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["']/i);
   if (metaDesc?.[1]) parts.push(metaDesc[1]);
-  
+
   const ogTitle = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
   if (ogTitle?.[1]) parts.push(ogTitle[1]);
 
@@ -136,7 +142,7 @@ function parseRSSFeed(xml: string, source: RegulatorySource): CrawledItem[] {
   const MAX_ITEMS_PER_FEED = 10;
   for (const item of itemsArray) {
     if (items.length >= MAX_ITEMS_PER_FEED) break;
-    
+
     const title = item.title?.["#text"] || item.title || "";
     const link = item.link?.["@_href"] || item.link || "";
     const description =
@@ -157,10 +163,9 @@ function parseRSSFeed(xml: string, source: RegulatorySource): CrawledItem[] {
       try {
         pubDateIso = pubDate ? new Date(pubDate).toISOString() : undefined;
       } catch { pubDateIso = undefined; }
-      
-      // Strip HTML from content for cleaner text
+
       const cleanContent = stripHtml(String(rawContent));
-      
+
       items.push({
         sourceId: source.id,
         sourceName: source.name,
@@ -179,8 +184,7 @@ function parseRSSFeed(xml: string, source: RegulatorySource): CrawledItem[] {
 
 function extractFromHTML(html: string, source: RegulatorySource): CrawledItem[] {
   const items: CrawledItem[] = [];
-  
-  // Use both turndown and stripHtml, pick the longer result
+
   let content: string;
   try {
     const turndownContent = turndownService.turndown(html);
@@ -193,19 +197,17 @@ function extractFromHTML(html: string, source: RegulatorySource): CrawledItem[] 
   const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
   const title = titleMatch ? titleMatch[1].trim() : source.name;
 
-  // Enrich thin pages with meta content and source metadata (like Claude does)
   if (content.length < 200) {
     const metaContent = extractMetaContent(html);
     const enrichment = [
       `Source: ${source.name}`,
       `Description: ${source.description}`,
-      `Jurisdiction: ${source.jurisdictionCountry}${source.jurisdictionState ? ' / ' + source.jurisdictionState : ''}`,
+      `Jurisdiction: ${source.jurisdictionCountry}${source.jurisdictionState ? " / " + source.jurisdictionState : ""}`,
       metaContent ? `Meta: ${metaContent}` : "",
     ].filter(Boolean).join("\n");
     content = `${enrichment}\n\n${content}`;
   }
 
-  // Accept content even if short (was: > 50, now: > 0 after enrichment)
   if (content.length > 0) {
     items.push({
       sourceId: source.id,
@@ -230,7 +232,14 @@ export async function crawlSource(source: RegulatorySource): Promise<CrawlResult
   };
 
   try {
-    if (source.type === "rss" || source.type === "search") {
+    if (source.type === "twitter_search") {
+      const bearerToken = process.env.X_BEARER_TOKEN;
+      if (!bearerToken) {
+        result.errors.push("X_BEARER_TOKEN not set");
+        return result;
+      }
+      result.items = await crawlTwitterSearchSource(source, bearerToken);
+    } else if (source.type === "rss" || source.type === "search") {
       const response = await fetchWithRetry(source.url);
       if (!response.ok) {
         result.errors.push(`HTTP ${response.status}: ${response.statusText}`);
@@ -278,26 +287,52 @@ export async function crawlSource(source: RegulatorySource): Promise<CrawlResult
   return result;
 }
 
+function dedupeItems(items: CrawledItem[]): CrawledItem[] {
+  const deduped = new Map<string, CrawledItem>();
+  for (const item of items) {
+    const key = `${item.url.toLowerCase()}::${item.title.toLowerCase()}`;
+    if (!deduped.has(key)) {
+      deduped.set(key, item);
+    }
+  }
+  return [...deduped.values()];
+}
+
 export async function crawlAllSources(
   sourceIds?: string[]
 ): Promise<CrawlResult[]> {
+  const allSources = [...sources, ...twitterSearchSources];
   const targetSources = sourceIds
-    ? sources.filter((s) => sourceIds.includes(s.id))
-    : sources;
+    ? allSources.filter((s) => sourceIds.includes(s.id))
+    : allSources;
+
+  const nonTwitterSources = targetSources.filter((s) => s.type !== "twitter_search");
+  const twitterSources = targetSources.filter((s) => s.type === "twitter_search");
 
   const results: CrawlResult[] = [];
   const CONCURRENCY = 10;
 
-  for (let i = 0; i < targetSources.length; i += CONCURRENCY) {
-    const batch = targetSources.slice(i, i + CONCURRENCY);
+  for (let i = 0; i < nonTwitterSources.length; i += CONCURRENCY) {
+    const batch = nonTwitterSources.slice(i, i + CONCURRENCY);
     const batchResults = await Promise.allSettled(
       batch.map((source) => crawlSource(source))
     );
 
     for (const r of batchResults) {
       if (r.status === "fulfilled") {
+        r.value.items = dedupeItems(r.value.items);
         results.push(r.value);
       }
+    }
+  }
+
+  for (let i = 0; i < twitterSources.length; i++) {
+    const twitterResult = await crawlSource(twitterSources[i]);
+    twitterResult.items = dedupeItems(twitterResult.items);
+    results.push(twitterResult);
+
+    if (i < twitterSources.length - 1) {
+      await sleep(TWITTER_INTER_QUERY_DELAY_MS);
     }
   }
 

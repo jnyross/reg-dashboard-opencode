@@ -1,9 +1,56 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sources = void 0;
+exports.sources = exports.twitterSearchSources = void 0;
 exports.getSourceById = getSourceById;
 exports.getSourcesByJurisdiction = getSourcesByJurisdiction;
 exports.getSourcesByTier = getSourcesByTier;
+const TWITTER_RECENT_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent";
+exports.twitterSearchSources = [
+    {
+        id: "twitter-under16-coppa-age-verification",
+        name: "X Search — Under 16 / COPPA",
+        url: TWITTER_RECENT_SEARCH_URL,
+        type: "twitter_search",
+        authorityType: "supranational",
+        jurisdictionCountry: "Global",
+        reliabilityTier: 3,
+        description: "X recent search for under-16 and COPPA regulation updates",
+        searchQuery: '"under 16" OR "under 16s" OR COPPA OR "age verification" (regulation OR law OR bill OR legislation) -is:retweet',
+    },
+    {
+        id: "twitter-meta-child-safety-minors",
+        name: "X Search — Meta Child Safety",
+        url: TWITTER_RECENT_SEARCH_URL,
+        type: "twitter_search",
+        authorityType: "supranational",
+        jurisdictionCountry: "Global",
+        reliabilityTier: 3,
+        description: "X recent search for Meta/Facebook/Instagram/WhatsApp child safety and minors privacy",
+        searchQuery: '(Meta OR Facebook OR Instagram OR WhatsApp) ("child safety" OR "children\'s privacy" OR "minor" OR "age restriction") -is:retweet',
+    },
+    {
+        id: "twitter-dsa-osa-kosa-teens",
+        name: "X Search — DSA / OSA / KOSA",
+        url: TWITTER_RECENT_SEARCH_URL,
+        type: "twitter_search",
+        authorityType: "supranational",
+        jurisdictionCountry: "Global",
+        reliabilityTier: 3,
+        description: "X recent search for DSA/Online Safety Act/KOSA updates affecting children and teens",
+        searchQuery: '("Digital Services Act" OR DSA OR "Online Safety Act" OR "KOSA") (children OR minors OR teens) -is:retweet',
+    },
+    {
+        id: "twitter-tiktok-snap-youtube-compliance",
+        name: "X Search — TikTok/Snap/YouTube Compliance",
+        url: TWITTER_RECENT_SEARCH_URL,
+        type: "twitter_search",
+        authorityType: "supranational",
+        jurisdictionCountry: "Global",
+        reliabilityTier: 3,
+        description: "X recent search for age verification and child-protection compliance on major platforms",
+        searchQuery: '(TikTok OR Snapchat OR YouTube) ("age verification" OR "parental consent" OR "child protection") compliance -is:retweet',
+    },
+];
 exports.sources = [
     {
         "id": "ftc-children-s-online-privacy-protection-rule-coppa",

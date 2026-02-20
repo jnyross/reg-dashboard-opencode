@@ -130,9 +130,9 @@ function upsertSource(db, source) {
   `).run(source.sourceId, source.name, source.url, source.authorityType, source.jurisdictionCountry, source.jurisdictionState || null, source.reliabilityTier, source.description || null, now);
     return Number(result.lastInsertRowid);
 }
-function generateEventId(url, jurisdiction, title) {
+function generateEventId(jurisdiction, jurisdictionState, title) {
     const hash = node_crypto_1.default.createHash("sha256");
-    hash.update(`${url}|${jurisdiction}|${title}`);
+    hash.update(`${jurisdiction}|${jurisdictionState || ""}|${title}`);
     return hash.digest("hex").substring(0, 16);
 }
 function isAgeBracketUnder16(ageBracket) {
@@ -140,9 +140,15 @@ function isAgeBracketUnder16(ageBracket) {
 }
 function upsertAnalyzedItem(db, item, reliabilityTier) {
     const now = new Date().toISOString();
-    const eventId = generateEventId(item.url, item.jurisdictionCountry, item.title);
-    const existing = db.prepare("SELECT id, stage, status FROM regulation_events WHERE source_url = ? AND jurisdiction_country = ? AND title = ?")
-        .get(item.url, item.jurisdictionCountry, item.title);
+    const eventId = generateEventId(item.jurisdictionCountry, item.jurisdictionState, item.title);
+    const jurisdictionState = item.jurisdictionState || "";
+    const existing = db.prepare(`SELECT id, stage, status
+     FROM regulation_events
+     WHERE jurisdiction_country = ?
+       AND COALESCE(jurisdiction_state, '') = ?
+       AND lower(title) = lower(?)
+     ORDER BY updated_at DESC
+     LIMIT 1`).get(item.jurisdictionCountry, jurisdictionState, item.title);
     let status = "new";
     let isNew = !existing;
     let statusChanged = false;

@@ -15,9 +15,10 @@ async function runPipeline(db, sourceIds) {
         startedAt: new Date().toISOString(),
         completedAt: "",
     };
+    const allSources = [...sources_1.sources, ...sources_1.twitterSearchSources];
     const targetSources = sourceIds
-        ? sources_1.sources.filter((s) => sourceIds.includes(s.id))
-        : sources_1.sources;
+        ? allSources.filter((s) => sourceIds.includes(s.id))
+        : allSources;
     const crawlConcurrency = Math.max(1, Number(process.env.CRAWL_CONCURRENCY || 10));
     const analysisConcurrency = Math.max(1, Math.min(20, Number(process.env.ANALYSIS_CONCURRENCY || 12)));
     console.log(`Starting pipeline for ${targetSources.length} sources...`);

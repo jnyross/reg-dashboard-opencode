@@ -1,5 +1,5 @@
 import DatabaseConstructor from "better-sqlite3";
-import { sources, RegulatorySource } from "./sources";
+import { sources, twitterSearchSources, RegulatorySource } from "./sources";
 import { crawlSource, CrawledItem } from "./crawler";
 import { analyzeItem } from "./analyzer";
 import { upsertSource, upsertAnalyzedItem } from "./db";
@@ -34,9 +34,10 @@ export async function runPipeline(
     completedAt: "",
   };
 
+  const allSources = [...sources, ...twitterSearchSources];
   const targetSources = sourceIds
-    ? sources.filter((s) => sourceIds.includes(s.id))
-    : sources;
+    ? allSources.filter((s) => sourceIds.includes(s.id))
+    : allSources;
 
   const crawlConcurrency = Math.max(1, Number(process.env.CRAWL_CONCURRENCY || 10));
   const analysisConcurrency = Math.max(1, Math.min(20, Number(process.env.ANALYSIS_CONCURRENCY || 12)));

@@ -8,6 +8,7 @@ exports.crawlAllSources = crawlAllSources;
 const fast_xml_parser_1 = require("fast-xml-parser");
 const turndown_1 = __importDefault(require("turndown"));
 const sources_1 = require("./sources");
+const twitter_crawler_1 = require("./twitter-crawler");
 const turndownService = new turndown_1.default();
 const xmlParser = new fast_xml_parser_1.XMLParser({
     ignoreAttributes: false,
@@ -17,6 +18,10 @@ const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
 const MAX_TEXT_LENGTH = 12_000;
 const CRAWL_TIMEOUT_MS = Number(process.env.CRAWL_TIMEOUT_MS || 90_000);
 const CRAWL_RETRIES = Number(process.env.CRAWL_RETRIES || 3);
+const TWITTER_INTER_QUERY_DELAY_MS = 1_500;
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 async function fetchWithTimeout(url, timeoutMs = CRAWL_TIMEOUT_MS) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -57,7 +62,7 @@ async function fetchWithRetry(url, timeoutMs = CRAWL_TIMEOUT_MS) {
         }
         if (attempt < CRAWL_RETRIES) {
             const backoffMs = 2000 * attempt;
-            await new Promise((resolve) => setTimeout(resolve, backoffMs));
+            await sleep(backoffMs);
         }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -130,7 +135,6 @@ function parseRSSFeed(xml, source) {
             catch {
                 pubDateIso = undefined;
             }
-            // Strip HTML from content for cleaner text
             const cleanContent = stripHtml(String(rawContent));
             items.push({
                 sourceId: source.id,
@@ -148,7 +152,6 @@ function parseRSSFeed(xml, source) {
 }
 function extractFromHTML(html, source) {
     const items = [];
-    // Use both turndown and stripHtml, pick the longer result
     let content;
     try {
         const turndownContent = turndownService.turndown(html);
@@ -160,18 +163,16 @@ function extractFromHTML(html, source) {
     }
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim() : source.name;
-    // Enrich thin pages with meta content and source metadata (like Claude does)
     if (content.length < 200) {
         const metaContent = extractMetaContent(html);
         const enrichment = [
             `Source: ${source.name}`,
             `Description: ${source.description}`,
-            `Jurisdiction: ${source.jurisdictionCountry}${source.jurisdictionState ? ' / ' + source.jurisdictionState : ''}`,
+            `Jurisdiction: ${source.jurisdictionCountry}${source.jurisdictionState ? " / " + source.jurisdictionState : ""}`,
             metaContent ? `Meta: ${metaContent}` : "",
         ].filter(Boolean).join("\n");
         content = `${enrichment}\n\n${content}`;
     }
-    // Accept content even if short (was: > 50, now: > 0 after enrichment)
     if (content.length > 0) {
         items.push({
             sourceId: source.id,
@@ -193,7 +194,15 @@ async function crawlSource(source) {
         crawledAt: new Date().toISOString(),
     };
     try {
-        if (source.type === "rss" || source.type === "search") {
+        if (source.type === "twitter_search") {
+            const bearerToken = process.env.X_BEARER_TOKEN;
+            if (!bearerToken) {
+                result.errors.push("X_BEARER_TOKEN not set");
+                return result;
+            }
+            result.items = await (0, twitter_crawler_1.crawlTwitterSearchSource)(source, bearerToken);
+        }
+        else if (source.type === "rss" || source.type === "search") {
             const response = await fetchWithRetry(source.url);
             if (!response.ok) {
                 result.errors.push(`HTTP ${response.status}: ${response.statusText}`);
@@ -240,19 +249,41 @@ async function crawlSource(source) {
     }
     return result;
 }
+function dedupeItems(items) {
+    const deduped = new Map();
+    for (const item of items) {
+        const key = `${item.url.toLowerCase()}::${item.title.toLowerCase()}`;
+        if (!deduped.has(key)) {
+            deduped.set(key, item);
+        }
+    }
+    return [...deduped.values()];
+}
 async function crawlAllSources(sourceIds) {
+    const allSources = [...sources_1.sources, ...sources_1.twitterSearchSources];
     const targetSources = sourceIds
-        ? sources_1.sources.filter((s) => sourceIds.includes(s.id))
-        : sources_1.sources;
+        ? allSources.filter((s) => sourceIds.includes(s.id))
+        : allSources;
+    const nonTwitterSources = targetSources.filter((s) => s.type !== "twitter_search");
+    const twitterSources = targetSources.filter((s) => s.type === "twitter_search");
     const results = [];
     const CONCURRENCY = 10;
-    for (let i = 0; i < targetSources.length; i += CONCURRENCY) {
-        const batch = targetSources.slice(i, i + CONCURRENCY);
+    for (let i = 0; i < nonTwitterSources.length; i += CONCURRENCY) {
+        const batch = nonTwitterSources.slice(i, i + CONCURRENCY);
         const batchResults = await Promise.allSettled(batch.map((source) => crawlSource(source)));
         for (const r of batchResults) {
             if (r.status === "fulfilled") {
+                r.value.items = dedupeItems(r.value.items);
                 results.push(r.value);
             }
+        }
+    }
+    for (let i = 0; i < twitterSources.length; i++) {
+        const twitterResult = await crawlSource(twitterSources[i]);
+        twitterResult.items = dedupeItems(twitterResult.items);
+        results.push(twitterResult);
+        if (i < twitterSources.length - 1) {
+            await sleep(TWITTER_INTER_QUERY_DELAY_MS);
         }
     }
     return results;

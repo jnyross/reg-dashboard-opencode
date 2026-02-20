@@ -156,9 +156,9 @@ export function upsertSource(
   return Number(result.lastInsertRowid);
 }
 
-function generateEventId(url: string, jurisdiction: string, title: string): string {
+function generateEventId(jurisdiction: string, jurisdictionState: string | null | undefined, title: string): string {
   const hash = crypto.createHash("sha256");
-  hash.update(`${url}|${jurisdiction}|${title}`);
+  hash.update(`${jurisdiction}|${jurisdictionState || ""}|${title}`);
   return hash.digest("hex").substring(0, 16);
 }
 
@@ -172,10 +172,18 @@ export function upsertAnalyzedItem(
   reliabilityTier: ReliabilityTier
 ): { id: string; isNew: boolean; statusChanged: boolean } {
   const now = new Date().toISOString();
-  const eventId = generateEventId(item.url, item.jurisdictionCountry, item.title);
-  
-  const existing = db.prepare("SELECT id, stage, status FROM regulation_events WHERE source_url = ? AND jurisdiction_country = ? AND title = ?")
-    .get(item.url, item.jurisdictionCountry, item.title) as { id: string; stage: string; status: string } | undefined;
+  const eventId = generateEventId(item.jurisdictionCountry, item.jurisdictionState, item.title);
+
+  const jurisdictionState = item.jurisdictionState || "";
+  const existing = db.prepare(
+    `SELECT id, stage, status
+     FROM regulation_events
+     WHERE jurisdiction_country = ?
+       AND COALESCE(jurisdiction_state, '') = ?
+       AND lower(title) = lower(?)
+     ORDER BY updated_at DESC
+     LIMIT 1`
+  ).get(item.jurisdictionCountry, jurisdictionState, item.title) as { id: string; stage: string; status: string } | undefined;
   
   let status: string = "new";
   let isNew = !existing;
